@@ -478,26 +478,24 @@ class ScalableReader(_StatefulDataset):
         self.setup()
         # Values to save: shard states (shard/repl), filesizes (single/repl)
         # Deepcopy required to prevent in-place modification from later prefetches
-        return deepcopy({
-            self.statename("shard_states"): self.shard_states.unsqueeze(0),
-            self.statename("file_info"): self.filesizes if self.rank == 0 else None
-        })
+        out = {
+            self.statename(f"shard_states_{self.rank}"): self.shard_states.unsqueeze(0)
+        }
+        if self.rank == 0:
+            out[self.statename("file_info")] = self.filesizes
+        return deepcopy(out)
     
     def load_state_dict(self, state_dict):
-        print("GOTHERE 2")
         self.setup()
         # Load back shard states (global), filesizes (all)
-        shard_states = state_dict[self.statename("shard_states")]
+        ss_keys = [x for x in state_dict.keys() if self.statename("shard_states") in x]
+        ss_keys.sort()
+        shard_states = [state_dict[x] for x in ss_keys]
         file_info = state_dict[self.statename("file_info")]
-        print(shard_states.size(0), self.worldsize)
-        if self.rank == 0:
-            print(shard_states.shape, shard_states)
-        if shard_states.size(0) == self.worldsize:
+        if len(shard_states) == self.worldsize:
             self.filesizes = file_info
             self.shard_states = shard_states[self.rank]
         else:
-            print("GOTHERE 3")
-            shard_states = [s[0] for s in shard_states.split(1)]  # [w] n 5
             shard_states = torch.cat(shard_states, dim=0)  # wn 5
             # Sort shards by epoch count
             sorted, indices = torch.sort(shard_states[:,4], descending=True, stable=True)
@@ -544,33 +542,47 @@ class ScalableReader(_StatefulDataset):
             # Pad out with dummy shards if needed
             self.shard_states[len(shard_states):,0] = -1
             self.shard_states[len(shard_states):,4] = torch.iinfo(torch.int).max
-        print("GOTHERE 4")
         return None
 
 
 #### -------------------------    CHECKPOINT FUNCTIONS    ------------------------- ####
 
 
-def __pop_dstate(state, device_mesh, placements, create_dtensor=False):
+def __pop_dstate(state, device_mesh, placements):
     """
     Removes worker states from the StatefulDataLoader state dict, and assembles them
-    into a separate list of dicts of dtensors for distributed checkpointing.
+    into a separate list of dicts for distributed checkpointing.
     """
     dstate = state["_snapshot"]["_worker_snapshots"]
     dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]
+    # Convert list[dict[tensor]] to single dict[tensor]
+    keyset = [list(d.keys()) for d in dstate]
+    out = {}
+    for key in set(sum(keyset), []):
+        # Key must appear in one keylist, or all of them
+        present = [int(key in keylist) for keylist in keyset]
+        if sum(present) == 1:
+            # Pull out single unique value
+            out[key] = dstate[present.index(True)][key]
+        elif sum(present) == len(present):
+            # Merge all values
+            
+
+
+
     # Flip list[dict[tensor]] to dict[list[tensor]], and concat
-    shardstate = "ScalableReader.shard_states"
-    fileinfo = "ScalableReader.file_info"
-    dstate_dict = {
-        shardstate: torch.cat([d[shardstate] for d in dstate], 0)
-    }
-    if create_dtensor == True:
-        dstate_dict[shardstate] = dtensor.DTensor.from_local(
-            dstate_dict[shardstate],
-            device_mesh,
-            placements,
-        )
-    dstate_dict[fileinfo] = dstate[0][fileinfo]
+    # shardstate = "ScalableReader.shard_states"
+    # fileinfo = "ScalableReader.file_info"
+    # dstate_dict = {
+    #     shardstate: torch.cat([d[shardstate] for d in dstate], 0)
+    # }
+    # if create_dtensor == True:
+    #     dstate_dict[shardstate] = dtensor.DTensor.from_local(
+    #         dstate_dict[shardstate],
+    #         device_mesh,
+    #         placements,
+    #     )
+    # dstate_dict[fileinfo] = dstate[0][fileinfo]
     return dstate_dict
 
 
@@ -637,5 +649,4 @@ def load_distributed_state_dict(
     for i in range(nworkers):
         state["_snapshot"]["_worker_snapshots"][f"worker_{i}"]["dataset_state"] = dstate[i]
     # Load into loader
-    print("GOTHERE")
     loader.load_state_dict(state)
