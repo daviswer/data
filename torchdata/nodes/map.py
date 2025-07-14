@@ -7,6 +7,8 @@
 import queue
 import threading
 import time
+
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Generic, Iterator, List, Literal, Optional, Protocol, Sequence, TypeVar, Union
 
 import torch.multiprocessing as mp
@@ -65,7 +67,11 @@ class MapOverBatch(Generic[X, T]):
         return [self.map_fn(x) for x in xlist]
 
 
-def _sort_worker(in_q: Union[queue.Queue, mp.Queue], out_q: queue.Queue, stop_event: threading.Event):
+def _sort_worker(
+    in_q: Union[queue.Queue, mp.Queue],
+    out_q: queue.Queue,
+    stop_event: threading.Event,
+):
     buffer: Dict[int, Any] = {}
     cur_idx = 0
     while not stop_event.is_set():
@@ -115,7 +121,7 @@ class _InlineMapperIter(Iterator[T]):
     def get_state(self) -> Dict[str, Any]:
         return {self.SOURCE_KEY: self.source.state_dict()}
 
-    def _shutdown(self):
+    def _shutdown(self, cancel_futures=False):
         pass
 
 
@@ -160,6 +166,11 @@ class _ParallelMapperIter(Iterator[T]):
         self._stop = threading.Event()
         self._mp_stop = mp_context.Event()
 
+        # This ensures that the stop events are set before the iterator is garbage collected.
+        # Theading's _register_atexit() are called before regular atexit handlers and
+        # before threads are joined.
+        threading._register_atexit(self._set_stop_events)  # type: ignore[attr-defined]
+
         self._steps_since_snapshot = 0
         fast_forward = 0
         if initial_state is not None:
@@ -171,51 +182,55 @@ class _ParallelMapperIter(Iterator[T]):
             self.source.reset()
         self._snapshot_store = QueueSnapshotStore()
 
-        self._read_thread = threading.Thread(
-            target=_populate_queue,
-            args=(
-                self.source,
-                self._in_q,
-                self._snapshot_store,
-                self.snapshot_frequency,
-                self._sem,
-                self._stop,
-            ),
-            daemon=True,
+        self.pool = ThreadPoolExecutor(self.num_workers + 2)
+        _read_future = self.pool.submit(
+            _populate_queue,
+            self.source,
+            self._in_q,
+            self._snapshot_store,
+            self.snapshot_frequency,
+            self._sem,
+            self._stop,
         )
-        self._workers: List[Union[threading.Thread, mp.Process]] = []
-        for worker_id in range(self.num_workers):
-            args = (
-                worker_id,
-                self._in_q,
-                self._intermed_q,
-                self.map_fn,
-                self._stop if self.method == "thread" else self._mp_stop,
-            )
-            self._workers.append(
-                threading.Thread(target=_apply_udf, args=args, daemon=True)
-                if self.method == "thread"
-                else mp_context.Process(target=_apply_udf, args=args, daemon=True)
-            )
-        self._sort_q: queue.Queue = queue.Queue()
-        self._sort_thread = threading.Thread(
-            target=_sort_worker,
-            args=(self._intermed_q, self._sort_q, self._stop),
-            daemon=True,
-        )
+
+        if self.method == "thread":
+            for worker_id in range(self.num_workers):
+                self.pool.submit(
+                    _apply_udf,
+                    worker_id,
+                    self._in_q,
+                    self._intermed_q,
+                    self.map_fn,
+                    self._stop,
+                )
+
+        elif self.method == "process":
+            self._workers: List[mp.Process] = []
+            for worker_id in range(self.num_workers):
+                _args = (
+                    worker_id,
+                    self._in_q,
+                    self._intermed_q,
+                    self.map_fn,
+                    self._mp_stop,
+                )
+                self._workers.append(mp_context.Process(target=_apply_udf, args=_args, daemon=True))
+            for t in self._workers:
+                t.start()
 
         self._out_q = self._intermed_q
         if self.in_order:
+            self._sort_q: queue.Queue = queue.Queue()
+            self.pool.submit(
+                _sort_worker,
+                self._intermed_q,
+                self._sort_q,
+                self._stop,
+            )
             self._out_q = self._sort_q
 
-        self._read_thread.start()
-        for t in self._workers:
-            t.start()
-        if self.in_order:
-            self._sort_thread.start()
-
         time.sleep(0.01)
-        self._snapshot = self._snapshot_store.get_initial_snapshot(thread=self._read_thread, timeout=ACK_TIMEOUT)
+        self._snapshot = self._snapshot_store.get_initial_snapshot(thread=_read_future, timeout=ACK_TIMEOUT)
 
         for i in range(fast_forward):
             try:
@@ -231,12 +246,14 @@ class _ParallelMapperIter(Iterator[T]):
 
     def __next__(self) -> T:
         while True:
-            if self._stop.is_set():
+            if self._stop.is_set() or self._mp_stop.is_set():
+                self._shutdown()
                 raise StopIteration()
             elif self._done and self._sem._value == self._max_tasks:
-                # Don't stop if we still have items in the queue
+                # _done is set, and semaphore is back at initial value, so we can stop
                 self._stop.set()
                 self._mp_stop.set()
+                self._shutdown()
                 raise StopIteration()
             try:
                 item, idx = self._out_q.get(block=True, timeout=QUEUE_TIMEOUT)
@@ -251,6 +268,7 @@ class _ParallelMapperIter(Iterator[T]):
             elif isinstance(item, ExceptionWrapper):
                 if not isinstance(item, StartupExceptionWrapper):
                     self._sem.release()
+                    self._shutdown()
                 item.reraise()
 
             self._steps_since_snapshot += 1
@@ -270,19 +288,37 @@ class _ParallelMapperIter(Iterator[T]):
             self._steps_since_snapshot = 0
 
     def __del__(self):
-        self._shutdown()
+        try:
+            self._shutdown()
+        except Exception:
+            pass
 
-    def _shutdown(self):
+    def _shutdown(self, cancel_futures=False):
         self._stop.set()
         self._mp_stop.set()
-        if hasattr(self, "_read_thread") and self._read_thread.is_alive():
-            self._read_thread.join(timeout=QUEUE_TIMEOUT * 5)
-        if hasattr(self, "_sort_thread") and self._sort_thread.is_alive():
-            self._sort_thread.join(timeout=QUEUE_TIMEOUT * 5)
+        if hasattr(self, "pool"):
+            if cancel_futures:
+                # Wait for all threads to finish before returning, but cancel any
+                # futures that are pending. This is used when calling _shutdown()
+                # from downstream shutdown()
+                self.pool.shutdown(wait=True, cancel_futures=True)
+            else:
+                # Wait for all threads to finish before returning.
+                # This is used when calling _shutdown() from __del__ or a reset()
+                self.pool.shutdown(wait=True)
         if hasattr(self, "_workers"):
             for t in self._workers:
                 if t.is_alive():
                     t.join(timeout=QUEUE_TIMEOUT * 5)
+
+    def _set_stop_events(self):
+        try:
+            if isinstance(self._in_q, queue.Queue):
+                with self._in_q.mutex:
+                    self._in_q.queue.clear()
+            self._stop.set()
+        except Exception:
+            pass
 
 
 class _ParallelMapperImpl(BaseNode[T]):
@@ -327,6 +363,7 @@ class _ParallelMapperImpl(BaseNode[T]):
     def reset(self, initial_state: Optional[Dict[str, Any]] = None):
         super().reset(initial_state)
         if self._it is not None:
+            self._it._shutdown()
             del self._it
 
         if self.num_workers > 0:
@@ -355,6 +392,13 @@ class _ParallelMapperImpl(BaseNode[T]):
 
     def get_state(self) -> Dict[str, Any]:
         return self._it.get_state()  # type: ignore[union-attr]
+
+    def shutdown(self):
+        if hasattr(self, "_it") and self._it is not None:
+            self._it._shutdown(cancel_futures=True)
+
+    def __del__(self):
+        self.shutdown()
 
 
 class ParallelMapper(BaseNode[T]):
@@ -447,6 +491,11 @@ class ParallelMapper(BaseNode[T]):
     def get_state(self) -> Dict[str, Any]:
         return {self.IT_STATE_KEY: self._it.state_dict()}  # type: ignore[union-attr]
 
+    def shutdown(self):
+        self._it.shutdown()
+        if hasattr(self.source, "shutdown"):
+            self.source.shutdown()
+
 
 _WorkerType = Callable[
     [
@@ -468,24 +517,25 @@ class _SingleThreadedMapper(Iterator[T]):
     Prefetcher and PinMemory.
 
     A thread is started on __init__ and stopped on __del__/_shutdown.
-    The thread runs _populate_queue, which acquires a BoundedSemaphore with initial value
+    The thread runs worker, which acquires a BoundedSemaphore with initial value
     of `prefetch_factor`.
 
     When next() is called on this iterator, it will block until an item is available on _q.
     Next will perform the following depending on what is pulled from the q:
     - StopIteration: raise StopIteration. Any subsequent next() calls will also raise StopIteration
-    - ExceptionWrapper: call reraise() on the exception wraper
+    - ExceptionWrapper: call reraise() on the exception wrapper
     - any other item: return the item
 
     A Bounded semaphore is used to limit concurrency and memory utilization.
-    If N items have been pulled from the source, and M items have been yielded by this iterator,
-    we maintain the invariant that semaphore.value + (N - M) == prefetch_factor (modulo
+    If N items have been pulled from the source (i.e. acquire the semaphore),
+    and M items have been yielded by this iterator (i.e. release the semaphore),
+    we maintain the invariant that semaphore.value + (M - N) == prefetch_factor (modulo
     non-atomicness of operations).
 
-    _populate_queue calls semaphore.acquire. When we pull an item from the queue, we
-    call semaphore.release (unless it's a StartupExceptionWrapper, because _populate_queue
+    worker calls semaphore.acquire. When we pull an item from the queue, we
+    call semaphore.release (unless it's a StartupExceptionWrapper, because worker
     does not acquire sempahores in this case). All outstanding items are either being
-    processed in _populate_queue, in the _q, or about to be returned by an in-flight next() call.
+    processed in worker, in the _q, or about to be returned by an in-flight next() call.
     """
 
     def __init__(
@@ -526,6 +576,7 @@ class _SingleThreadedMapper(Iterator[T]):
                 self._stop_event,
             ),
             daemon=True,
+            name=f"worker_thread(target={self.worker.__name__})",
         )
         self._thread.start()
 
@@ -548,6 +599,7 @@ class _SingleThreadedMapper(Iterator[T]):
     def __next__(self) -> T:
         while True:
             if self._stop_event.is_set():
+                self._shutdown()
                 raise StopIteration()
             try:
                 item, idx = self._q.get(block=True, timeout=QUEUE_TIMEOUT)
@@ -557,11 +609,13 @@ class _SingleThreadedMapper(Iterator[T]):
             if isinstance(item, StopIteration):
                 self._sem.release()
                 self._stop_event.set()
+                self._shutdown()
                 raise item
             elif isinstance(item, ExceptionWrapper):
                 if not isinstance(item, StartupExceptionWrapper):
                     # We don't need to release for startup exceptions
                     self._sem.release()
+                    self._shutdown()
                 self._stop_event.set()
                 item.reraise()
             else:

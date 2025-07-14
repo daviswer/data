@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from typing import Any, Dict, Generic, Optional
 
 from torchdata.nodes.base_node import BaseNode, T
@@ -123,7 +129,7 @@ class LoaderIterator(BaseNode[T]):
             self._cached_state_dict = None
         else:
             item = next(self.root)
-        self._num_yielded += 1
+            self._num_yielded += 1
         return item
 
     def get_state(self) -> Dict[str, Any]:

@@ -5,9 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import itertools
-
 import unittest
 from typing import List, Optional
+from unittest import mock
 
 from parameterized import parameterized
 from torch.testing._internal.common_utils import IS_WINDOWS, TEST_CUDA, TestCase
@@ -131,7 +131,11 @@ class TestMap(TestCase):
         )
     )
     def test_save_load_state_thread(
-        self, midpoint: int, in_order: bool, snapshot_frequency: int, prebatch: Optional[int]
+        self,
+        midpoint: int,
+        in_order: bool,
+        snapshot_frequency: int,
+        prebatch: Optional[int],
     ):
         method = "thread"
         batch_size = 6
@@ -159,7 +163,11 @@ class TestMap(TestCase):
         )
     )
     def test_save_load_state_process(
-        self, midpoint: int, in_order: bool, snapshot_frequency: int, prebatch: Optional[int]
+        self,
+        midpoint: int,
+        in_order: bool,
+        snapshot_frequency: int,
+        prebatch: Optional[int],
     ):
         method = "process"
         batch_size = 6
@@ -179,3 +187,130 @@ class TestMap(TestCase):
         )
         node = Prefetcher(node, prefetch_factor=2)
         run_test_save_load_state(self, node, midpoint)
+
+    def test_thread_pool_executor_shutdown_on_del(self):
+        """Test that the ThreadPoolExecutor is properly shut down when the iterator is deleted."""
+        # Create a ParallelMapper with method="thread"
+        src = MockSource(num_samples=10)
+        node = ParallelMapper(
+            src,
+            RandomSleepUdf(),
+            num_workers=2,
+            method="thread",
+        )
+
+        # Reset the node to create the iterator
+        node.reset()
+
+        # We need to consume some items to ensure the ThreadPoolExecutor is created
+        # and the worker threads are started
+        for _ in range(5):
+            next(node)
+
+        # Use mock.patch to intercept the ThreadPoolExecutor.shutdown method
+        with mock.patch("concurrent.futures.ThreadPoolExecutor.shutdown") as mock_shutdown:
+            # Delete the node, which should trigger the shutdown of the ThreadPoolExecutor
+            del node
+
+            # Verify that shutdown was called
+            mock_shutdown.assert_called()
+
+    def test_thread_pool_executor_shutdown_on_exception(self):
+        """Test that the ThreadPoolExecutor is properly shut down when the iterator is deleted."""
+        # Create a ParallelMapper with method="thread"
+        src = MockSource(num_samples=10)
+        node = ParallelMapper(
+            src,
+            udf_raises,
+            num_workers=2,
+            method="thread",
+        )
+
+        # Reset the node to create the iterator
+        node.reset()
+
+        # Use mock.patch to intercept the ThreadPoolExecutor.shutdown method
+        with mock.patch("concurrent.futures.ThreadPoolExecutor.shutdown") as mock_shutdown:
+            # Consumer the iterator to ensure the ThreadPoolExecutor is created
+            # and exception is raised
+            try:
+                next(node)
+            except ValueError:
+                pass
+
+            # Verify that shutdown was called
+            mock_shutdown.assert_called()
+
+    def test_thread_pool_executor_cancel_futures_shutdown(self):
+        """Test that the ThreadPoolExecutor shutdown respects the cancel_futures parameter."""
+        src = MockSource(num_samples=10)
+        node = ParallelMapper(
+            src,
+            RandomSleepUdf(),
+            num_workers=2,
+            method="thread",
+        )
+
+        node.reset()
+        parallel_mapper_iter = node._it._it  # type: ignore
+
+        for _ in range(5):
+            next(node)
+
+        # Test cancel_futures=True
+        with mock.patch("concurrent.futures.ThreadPoolExecutor.shutdown") as mock_shutdown:
+            parallel_mapper_iter._shutdown(cancel_futures=True)
+            mock_shutdown.assert_called_with(wait=True, cancel_futures=True)
+
+        node.reset()
+        parallel_mapper_iter = node._it._it  # type: ignore
+
+        for _ in range(5):
+            next(node)
+
+        # Test cancel_futures=False
+        with mock.patch("concurrent.futures.ThreadPoolExecutor.shutdown") as mock_shutdown:
+            parallel_mapper_iter._shutdown(cancel_futures=False)
+            mock_shutdown.assert_called_with(wait=True)
+
+    def test_explicit_shutdown_thread(self):
+        """Test that the explicit shutdown method properly shuts down the node."""
+        mock_source = mock.MagicMock()
+        mock_source.shutdown = mock.MagicMock()
+
+        node = ParallelMapper(
+            mock_source,
+            RandomSleepUdf(),
+            num_workers=2,
+            method="thread",
+        )
+
+        node.reset()
+
+        with mock.patch.object(node._it._it, "_shutdown") as mock_shutdown:
+            node.shutdown()
+            mock_shutdown.assert_called_once_with(cancel_futures=True)
+            mock_source.shutdown.assert_called_once()
+
+    def test_explicit_shutdown_process(self):
+        """Test that the explicit shutdown method properly shuts down the node with process method."""
+        multiprocessing_context = None if IS_WINDOWS else "forkserver"
+
+        mock_source = mock.MagicMock()
+        mock_source.shutdown = mock.MagicMock()
+
+        node = ParallelMapper(
+            mock_source,
+            RandomSleepUdf(),
+            num_workers=2,
+            method="process",
+            multiprocessing_context=multiprocessing_context,
+        )
+
+        node.reset()
+
+        # Mock the _shutdown method of the iterator
+        with mock.patch.object(node._it._it, "_shutdown") as mock_shutdown:
+            node.shutdown()
+            mock_shutdown.assert_called_once_with(cancel_futures=True)
+            mock_source.shutdown.assert_called_once()

@@ -110,6 +110,7 @@ class TestMultiNodeWeightedSampler(TestCase):
             # Check that max items are taken from at least one dataset
             self.assertGreaterEqual(dataset_counts_in_results.count(self._num_samples), 1)
             node.reset()
+        node.shutdown()
 
     @parameterized.expand(range(10))
     def test_multi_node_weighted_sampler_all_dataset_exhausted(self, seed) -> None:
@@ -137,6 +138,7 @@ class TestMultiNodeWeightedSampler(TestCase):
             # check that all datasets are exhausted
             self.assertEqual(sorted(set(datasets_in_results)), ["ds0", "ds1", "ds2", "ds3"])
             node.reset()
+        node.shutdown()
 
     @parameterized.expand(range(10))
     def test_multi_node_weighted_sampler_cycle_until_all_exhausted(self, seed) -> None:
@@ -156,6 +158,7 @@ class TestMultiNodeWeightedSampler(TestCase):
             # check that all datasets are exhausted
             self.assertEqual(sorted(datasets_in_results), ["ds0", "ds1", "ds2", "ds3"])
             node.reset()
+        node.shutdown()
 
     @parameterized.expand(range(10))
     def test_multi_node_weighted_sampler_cycle_forever(self, seed) -> None:
@@ -219,6 +222,7 @@ class TestMultiNodeWeightedSampler(TestCase):
             results = list(node)
             overall_results.append(results)
             node.reset()
+        node.shutdown()
 
         unique_results = []
         for results in overall_results:
@@ -240,6 +244,7 @@ class TestMultiNodeWeightedSampler(TestCase):
             results = list(node)
             overall_results.append(results)
             node.reset()
+        node.shutdown()
 
         unique_results = []
         for results in overall_results:
@@ -308,3 +313,65 @@ class TestMultiNodeWeightedSampler(TestCase):
             stop_criteria,
         )
         run_test_save_load_state(self, node, midpoint)
+
+    def test_multi_node_weighted_sampler_tag_output_dict_items(self) -> None:
+        """Test MultiNodeWeightedSampler with tag_output=True for dictionary items"""
+        node = MultiNodeWeightedSampler(
+            self.datasets,
+            self.weights,
+            tag_output=True,
+        )
+
+        results = list(node)
+
+        # Verify that each result has a 'dataset_key' key with the correct dataset name
+        for result in results:
+            self.assertIn("dataset_key", result)
+
+            dataset_name = result["dataset_key"]
+            self.assertIn(dataset_name, [f"ds{i}" for i in range(self._num_datasets)])
+
+            self.assertIn("name", result)
+            self.assertIn("test_tensor", result)
+
+            self.assertEqual(dataset_name, result["name"])
+
+    def test_multi_node_weighted_sampler_tag_output_non_dict_items(self) -> None:
+        """Test MultiNodeWeightedSampler with tag_output=True for non-dictionary items"""
+        non_dict_datasets = {f"ds{i}": IterableWrapper(range(i * 10, (i + 1) * 10)) for i in range(self._num_datasets)}
+
+        node = MultiNodeWeightedSampler(
+            non_dict_datasets,
+            self.weights,
+            tag_output=True,
+        )
+
+        results = list(node)
+
+        # Verify that each result is now a dictionary with 'data' and 'dataset_key' keys
+        for result in results:
+            self.assertIsInstance(result, dict)
+
+            self.assertIn("data", result)
+            self.assertIn("dataset_key", result)
+
+            dataset_name = result["dataset_key"]
+            self.assertIn(dataset_name, [f"ds{i}" for i in range(self._num_datasets)])
+
+    def test_multi_node_weighted_sampler_tag_output_false(self) -> None:
+        """Test MultiNodeWeightedSampler with tag_output=False (default behavior)"""
+        node = MultiNodeWeightedSampler(
+            self.datasets,
+            self.weights,
+            tag_output=False,
+        )
+
+        results = list(node)
+
+        # Verify that none of the results have a 'dataset' key
+        for result in results:
+            self.assertNotIn("dataset", result)
+
+            # Check that the original data is preserved
+            self.assertIn("name", result)
+            self.assertIn("test_tensor", result)
