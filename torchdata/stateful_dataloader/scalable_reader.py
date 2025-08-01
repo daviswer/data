@@ -2,15 +2,16 @@ import logging
 import math
 import os
 import pyarrow as pa
+import tempfile
 from abc import ABCMeta, abstractmethod
 from copy import deepcopy
-from typing import Any, Callable, List, Optional, Set
+from typing import Any, Callable, List, Optional, Set, Tuple
 
 import torch
-from torch.distributed import checkpoint
-from torch.distributed.checkpoint.state_dict_loader import _load_state_dict_from_keys
-import torch.distributed.tensor as dtensor
-import torch.distributed as dist
+# from torch.distributed import checkpoint
+# from torch.distributed.checkpoint.state_dict_loader import _load_state_dict_from_keys
+# import torch.distributed.tensor as dtensor
+# import torch.distributed as dist
 import torch.utils.data as data
 
 from .stateful_dataloader import StatefulDataLoader
@@ -43,8 +44,16 @@ globally onto each ScalableReader. Then, completed and incomplete logical shards
 separately, to ensure that each worker receives roughly the same ratio of seen to unseen data in the
 current epoch. This allows us to scale from any number of workers to any other number.
 
-State dicts must be saved using DCP in current code, but this can also be relaxed in future for cases when
-rescaling is not required. Rescaling will always require DCP.
+State dict saving and loading behavior is governed by tagging the relevant class variables as one of 4
+options: 1) state (scalar values dropped when rescaling), 2) broadcast (saved values identical across all 
+workers), 3) reshard (tensors that are repartitioned on dim 0 when rescaling), and 4) custom (paired with 
+a user-provided resharding function, for when more sophisticated behavior is required). The base 
+_StatefulDataset stub illustrates usage. 
+
+Differently tagged state values are saved under separate state sub-dictionaries. A separate saving/loading
+framework is required for aggregating state dicts from workers and saving/loading to disk. The current
+code is a custom naive implementation, and will be deprecated to testing purposes as we pivot
+to DCP integration.
 """
 
 
@@ -53,7 +62,9 @@ rescaling is not required. Rescaling will always require DCP.
 class _StatefulDataset(data.IterableDataset):
     """
     Stub for stateful datasets, extends data.IterableDataset with state_dict methods.
-    All subclasses should specify the params to be considered stateful via self.state_params.
+    All subclasses should specify the variables to be considered stateful via the provided tag lists.
+    State, Broadcast, Reshard, and Custom state variables should be assigned to the relevant list
+    (e.g. self.state_vars, self.broadcast_vars, etc.)
     """
 
     def __init__(
@@ -67,7 +78,6 @@ class _StatefulDataset(data.IterableDataset):
         assert datapath is None or (
             os.path.isdir(datapath) and len(os.listdir(datapath)) > 0
         ), f"Data path {datapath} must be a non-empty folder or None"
-        self.state_params: List[str] = []
 
         # Default fields
         self.datapath = datapath
@@ -77,6 +87,15 @@ class _StatefulDataset(data.IterableDataset):
 
         # Setup / loading flags
         self.is_setup = False
+
+        # Tag lists for state saving/loading
+        self.state_vars: List[str] = []
+        self.broadcast_vars: List[str] = []
+        self.reshard_vars: List[str] = []
+        self.custom_vars: List[Tuple[str, Callable[[List[Any], int, int], Any]]] = []
+        # Every custom var must be bundled with a corresponding resharding function 
+        # that maps the list of prior values over workers, the rank, and the world size
+        # to the new value for this worker. This fn must be defined or imported inside this file.
 
     def setup(self):
         """
@@ -111,18 +130,32 @@ class _StatefulDataset(data.IterableDataset):
 
     def state_dict(self):
         """
-        Retrieve all state_params (each worker/process produces its own state dict shard).
+        Retrieve all state vars (each worker/process produces its own state dict shard).
         On the off chance that you're saving a checkpoint with zero steps, run setup first.
         """
         self.setup()
-        return {self.statename(flag): getattr(self, flag) for flag in self.state_params}
+        out = {}
+        for state_type,flags in zip(
+            ["state", "broadcast", "reshard"],
+            [self.state_vars, self.broadcast_vars, self.reshard_vars],
+        ):
+            out[state_type] = {self.statename(flag): getattr(self, flag) for flag in flags}
+        out["custom"] = {self.statename(flag): (getattr(self, flag), fn) for flag,fn in self.custom_vars}
+        # Deepcopy required to prevent in-place modification from later prefetches
+        return deepcopy(out)
 
     def load_state_dict(self, state_dict):
         """
-        Run setup if needed, and apply all applicable state_params from the state_dict.
+        Run setup if needed, and apply all applicable state vars from the state_dict.
         """
         self.setup()
-        [setattr(self, flag, state_dict[self.statename(flag)]) for flag in self.state_params]
+        for state_type,flags in zip(
+            ["state", "broadcast", "reshard"],
+            [self.state_vars, self.broadcast_vars, self.reshard_vars],
+        ):
+            [setattr(self, flag, state_dict[state_type][self.statename(flag)]) for flag in flags]
+        # Assume that custom reshard fn has already been applied
+        [setattr(self, flag, state_dict["custom"][self.statename(flag)][0]) for flag,fn in self.custom_vars]
 
 
 class _NestedStatefulDataset(_StatefulDataset):
@@ -166,18 +199,13 @@ class _NestedStatefulDataset(_StatefulDataset):
     def state_dict(self):
         """
         Fetches state dict recursively from wrapped layers, then adds specified flags.
-        Overlapping flags are overwritten with a warning.
+        Overlapping flags are overwritten by values from THIS layer.
         """
         self.setup()
         out = self.dataset.state_dict()
         state = super().state_dict()
-        for flag in self.state_params:
-            if flag in out:
-                logging.warning(
-                    f"Loader {self.rank}: flag {flag} already present in state_dict with value {out[flag]}. "
-                    + f"Overwriting with value {state[flag]}"
-                )
-        out.update(state)
+        for state_type in state.keys():
+            out[state_type].update(state[state_type])
         return out
 
 
@@ -355,6 +383,9 @@ class ScalableReader(_StatefulDataset):
         self.filesizes = None  # [[filenames], [filesizes]]  (constructed pre-iter if not loaded from ckp)
         self.shard_states = None  # shardid, file pos, doc pos, chunk pos, epoch   (reshardable state buffer)
 
+        self.broadcast_vars = ["filesizes"]
+        self.custom_vars = [("shard_states", shard_rescale)]
+
         # TODO: add handling to prevent zero-length allocations
 
     def _get_shard_breakdown(self, rank, nshards):
@@ -389,8 +420,8 @@ class ScalableReader(_StatefulDataset):
 
     def setup(self):
         """
-        Perform any rank-dependent setup. This operation is deferred from __init__ to support
-        multiple workers in the dataloader.
+        Perform any rank- and path-dependent setup. This operation is deferred from __init__ 
+        to support multiple workers in the dataloader.
         """
         if not self.is_setup:
             # Get your adjusted rank and worldsize
@@ -505,174 +536,225 @@ class ScalableReader(_StatefulDataset):
                 # Increase epoch count after finishing shard
                 self.shard_states[i][4] += 1
             # Begin new epoch
-
-    def state_dict(self):
-        self.setup()
-        # Values to save: shard states, filesizes
-        # Deepcopy required to prevent in-place modification from later prefetches
-        out = {self.statename("shard_states", rank=self.rank): self.shard_states}
-        if self.rank==0:
-            out[self.statename("file_info")] = self.filesizes
-        return deepcopy(out)
     
-    def load_state_dict(self, state_dict):
-        self.setup()
-        # Load back shard states and file sizes
-        shard_states = state_dict[self.statename("shard_states")]  # list[tensor]
-        file_info = state_dict[self.statename("file_info")]
-        if len(shard_states) == self.worldsize:
-            self.filesizes = file_info
-            self.shard_states = shard_states[self.rank]
-        else:
-            # Sort shards by epoch count
-            shard_states = torch.cat(shard_states, dim=0)
-            sorted, indices = torch.sort(shard_states[:,4], descending=True, stable=True)
-            shard_states = shard_states[indices]
-            # Strip out dummy padding shards
-            n_dummies = sorted.eq(torch.iinfo(torch.int).max).sum()
-            shard_states = shard_states[n_dummies:]  # n_logical 5
-            assert len(shard_states) == self.n_logical_shards, f"Number of shards {len(shard_states)} does not match specified {self.n_logical_shards}"
-            sorted = sorted[n_dummies:]
-            # Split into max and non-max epochs
-            n_complete = sorted.eq(sorted[0]).sum()
-            completed_shards = shard_states[:n_complete]
-            incomplete_shards = shard_states[n_complete:]
-            # Allocate completed shards
-            completed_shards = [
-                completed_shards[
-                    round(i*len(completed_shards)/self.worldsize):
-                    round((i+1)*len(completed_shards)/self.worldsize)
-                ] for i in range(self.worldsize)
-            ]
-            # Sort completed shards by length
-            completed_shards.sort(key=len)
-            # Allocate incomplete shards
-            incomplete_shards = [
-                incomplete_shards[
-                    round(i*len(incomplete_shards)/self.worldsize):
-                    round((i+1)*len(incomplete_shards)/self.worldsize)
-                ] for i in range(self.worldsize)
-            ]
-            # Reverse sort incomplete shards by length
-            # Minimizes padding by overallocating incomplete shards to underallocated complete shards
-            incomplete_shards.sort(key=len, reverse=True)
 
-            # Pull out shard allocation for this worker
-            # (sort/reverse-sort ensures allocations are off by no more than 1)
-            shards = [
-                completed_shards[self.rank],
-                incomplete_shards[self.rank]
-            ]
-            shard_states = torch.cat(shards)
-            # Order shards by global ID (for steady file progression)
-            _, indices = shard_states[:,0].sort()
-            self.shard_states[:len(shard_states)] = shard_states[indices]
-            # Pad out with dummy shards if needed
-            self.shard_states[len(shard_states):,0] = -1
-            self.shard_states[len(shard_states):,4] = torch.iinfo(torch.int).max
-        return None
+def shard_rescale(shard_states: List[torch.Tensor], rank: int, worldsize: int):
+    """
+    Custom function for rescaling of ScalableReader.shard_states
+    """
+    if len(shard_states) == worldsize:
+        return shard_states[rank]
+    else:
+        # Sort shards by epoch count
+        shard_states = torch.cat(shard_states, dim=0)
+        sorted, indices = torch.sort(shard_states[:,4], descending=True, stable=True)
+        shard_states = shard_states[indices]
+        # Strip out dummy padding shards
+        n_dummies = sorted.eq(torch.iinfo(torch.int).max).sum()
+        shard_states = shard_states[n_dummies:]  # n_logical 5
+        sorted = sorted[n_dummies:]
+        # Split into max and non-max epochs
+        n_complete = sorted.eq(sorted[0]).sum()
+        completed_shards = shard_states[:n_complete]
+        incomplete_shards = shard_states[n_complete:]
+        # Allocate completed shards
+        completed_shards = [
+            completed_shards[
+                round(i*len(completed_shards)/worldsize):
+                round((i+1)*len(completed_shards)/worldsize)
+            ] for i in range(worldsize)
+        ]
+        # Sort completed shards by length
+        completed_shards.sort(key=len)
+        # Allocate incomplete shards
+        incomplete_shards = [
+            incomplete_shards[
+                round(i*len(incomplete_shards)/worldsize):
+                round((i+1)*len(incomplete_shards)/worldsize)
+            ] for i in range(worldsize)
+        ]
+        # Reverse sort incomplete shards by length
+        # Minimizes padding by overallocating incomplete shards to underallocated complete shards
+        incomplete_shards.sort(key=len, reverse=True)
+        
+        # Pull out shard allocation for this worker
+        # (sort/reverse-sort ensures allocations are off by no more than 1)
+        shards = [
+            completed_shards[rank],
+            incomplete_shards[rank]
+        ]
+        shard_states = torch.cat(shards)
+        # Order shards by global ID (for steady file progression)
+        _, indices = shard_states[:,0].sort()
+        shard_states[:len(shard_states)] = shard_states[indices]
+        # Pad out with dummy shards if needed
+        shard_states[len(shard_states):,0] = -1
+        shard_states[len(shard_states):,4] = torch.iinfo(torch.int).max
+        return shard_states
 
 
 #### -------------------------    CHECKPOINT FUNCTIONS    ------------------------- ####
 
 
-def __pop_dstate(state, device_mesh, placements, create_dtensor=False):
-    """
-    Removes worker states from the StatefulDataLoader state dict, and fuses them into a single dict
-    (assuming no key overlap, which we currently guarantee by adding a rank to each worker's shardstate)
-    Includes old dtensor logic but currently not used (as no state buffers are getting resharded
-    straightforwardly). This will likely change in the future.
-    """
-    dstate = state["_snapshot"]["_worker_snapshots"]
-    dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]
-    # Fuse dstate dicts
-    return {k:v for d in dstate for k,v in d.items()}
-    # # Flip list[dict[tensor]] to dict[list[tensor]], and concat
-    # shardstate = "ScalableReader.shard_states"
-    # fileinfo = "ScalableReader.file_info"
-    # dstate_dict = {
-    #     shardstate: torch.cat([d[shardstate] for d in dstate], 0)
-    # }
-    # if create_dtensor == True:
-    #     dstate_dict[shardstate] = dtensor.DTensor.from_local(
-    #         dstate_dict[shardstate],
-    #         device_mesh,
-    #         placements,
-    #     )
-    # dstate_dict[fileinfo] = dstate[0][fileinfo]
-    # return dstate_dict
-
-
-def save_distributed_state_dict(
+def save_ckpt_custom(
     loader: StatefulDataLoader,
     path: str,
-    device_mesh: dist.DeviceMesh,
 ):
     """
     Retrieves dataloader state dict, and separates worker states from loader state.
-    Loader state is not rescalable, and is discarded when rescaling.
-    Saves dict using DCP.
+    Aggregates worker states, and separates out state/broadcast/reshard/custom variables.
+    Saves each state dict separately. 
     """
+    rank = loader.dataset.rank
     state = deepcopy(loader.state_dict())
-    dstate = __pop_dstate(state, device_mesh, [dtensor.placement_types.Shard(0)], True)
-    # # Prune empty fileinfos
-    # if dstate["ScalableReader.file_info"] is None:
-    #     dstate.pop("ScalableReader.file_info")
-    out = {"state":state, "dstate":dstate}
-    # Write distributed state dict
-    writer = checkpoint.FileSystemWriter(path)
-    checkpoint.save(
-        out,
-        writer,
+    dstate = state["_snapshot"]["_worker_snapshots"]
+    dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]  # List[dict]
+    # Flip List[dict[dict]] to dict[List[dict]]
+    dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}
+
+    # State dict: add loader state and save as is
+    state_vars = dstate["state"]
+    state_vars.append(state)
+    torch.save(
+        state_vars,
+        os.path.join(path, f"loader_state_{rank}.pth"),
+    )
+    
+    # Broadcast dict: Save only first entry, only if rank is 0
+    if rank == 0:
+        broadcast_vars = dstate["broadcast"][0]
+        torch.save(
+            broadcast_vars,
+            os.path.join(path, f"loader_broadcast.pth"),
+        )
+    
+    # Reshard dict: Assert is tensor and aggregate values
+    reshard_vars = dstate["reshard"]
+    # Assert all reshard vals are tensors
+    for k,v in reshard_vars[0].items():
+        assert isinstance(v, torch.Tensor), f"Reshard var {k} is not a torch tensor!"
+    # Flip list[dict] to dict[list]
+    reshard_vars = {k:[d[k] for d in reshard_vars] for k in reshard_vars[0].keys()}
+    torch.save(
+        reshard_vars,
+        os.path.join(path, f"loader_reshard_{rank}.pth"),
+    )
+    
+    # Custom dict: Aggregate lists of (val,fn) tuples into tuples of (list[val], fn)
+    # (assumes fn is consistent across ranks)
+    custom_vars = dstate["custom"]
+    # Flip list[dict[tuple]] into dict[tuple[list]]
+    custom_vars = {k:([d[k][0] for d in custom_vars], custom_vars[0][k][1]) for k in custom_vars[0].keys()}
+    torch.save(
+        custom_vars,
+        os.path.join(path, f"loader_custom_{rank}.pth"),
     )
 
 
-def load_distributed_state_dict(
+def load_ckpt_custom(
     loader: StatefulDataLoader,
     path: str,
-    device_mesh: dist.DeviceMesh,
 ):
     """
-    Retrieves dataloader state dict using DCP, and separates worker states from loader state.
-    If not rescaling, load saved dataloader state.
-    States are replicated over workers, and ScalableReader will handle
-    partitioning and re-assignment of available states into logical ranks.
-
-    Loading back to the same number of workers results in key overlap for 'state', so I suspect
-    that any rank-dependent dataloader state is being lost or overwritten in this case.
-    TODO: verify/fix
+    Retrieves dataloader state dict, and separates worker states from loader state.
+    Handle loading/rescaling for the 4 tags.
     """
     base = loader.state_dict()
     nworkers = base["_snapshot"]["_main_snapshot"]["_num_workers"]
-    dstate = __pop_dstate(base, device_mesh, [dtensor.placement_types.Shard(0)], True)
-    inp = {"state":deepcopy(base), "dstate":dstate}
-    # Read distributed state dict
-    reader = checkpoint.FileSystemReader(path)
-    inp = _load_state_dict_from_keys(
-        keys=set(["state", "dstate"]),
-        storage_reader = reader,
-    )  # NOTE: assumes inp["state"] is same across all devices
-    dstate = inp["dstate"]
-    # Re-pack the set of rankX args
-    # NOTE: this is the step currently breaking the no-DCP path
-    keys = list(dstate.keys())
-    ranked_state = {k:dstate.pop(k) for k in keys if "rank" in k}
-    ranked_keylist = sorted(list(ranked_state.keys()))
-    compiled_ranked = [ranked_state[k] for k in ranked_keylist]
-    dstate[ranked_keylist[0][6:]] = compiled_ranked  # Drop "rank0." prefix
-    # # De-DTensor-fy the shard states
-    # dstate["ScalableReader.shard_states"] = dstate["ScalableReader.shard_states"].full_tensor()
-    # Check that number of workers matches
-    ckp_ws = 0 if not os.path.exists(path) else len([x for x in os.listdir(path) if "loader" in x])
-    if ckp_ws == loader.dataset.worldsize and nworkers == state["_snapshot"]["_main_snapshot"]["_num_workers"]:
-        state = inp["state"]
+    r = loader.dataset.rank
+    w = loader.dataset.worldsize
+    dstate = base["_snapshot"]["_worker_snapshots"]
+    dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]  # List[dict]
+    # Flip List[dict[dict]] to dict[List[dict]]
+    dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}    inp = {"state":deepcopy(base), "dstate":dstate}
+    
+    ckp_ws = 0 if not os.path.exists(path) else len([x for x in os.listdir(path) if "loader_state_" in x])
+    easy_load = False
+    if ckp_ws == w:
+        state_vars = torch.load(os.path.join(path, f"loader_state_{r}.pth"))
+        loader_state = state_vars.pop(-1)
+        easy_load = nworkers == loader_state["_snapshot"]["_main_snapshot"]["_num_workers"]
+    
+    # State: load if easy, otherwise ignore
+    if easy_load:
+        # Loader state
+        base = loader_state
+        # Worker states
+        dstate["state"] = state_vars
+
+    # Broadcast: load across all cases
+    broadcast_vars = torch.load(os.path.join(path, f"loader_broadcast.pth"))
+    dstate["broadcast"] = [broadcast_vars] * nworkers
+
+    # Reshard: if easy, flip labels; else concat and reshard
+    if easy_load:
+        reshard_vars = torch.load(os.path.join(path, f"loader_reshard_{r}.pth"))
+        # Flip dict[list] back to list[dict]
+        reshard_vars = [{k:reshard_vars[i][k] for k in reshard_vars} for i in range(nworkers)]
+        dstate["reshard"] = reshard_vars
     else:
-        # On mismatch, discard saved non-reshardable loader state and start fresh
-        state = base
-    # Repeat global tensor over all workers
-    dstate = [inp["dstate"],]*nworkers
-    # Re-insert worker states into loader state
+        # Load all shards
+        reshard_vars = [torch.load(os.path.join(path, f"loader_reshard_{i}.pth")) for i in range(ckp_ws)]  # list[dict[list]]
+        # Flip list[dict[list]] to dict[list[list]]
+        reshard_vars = {k:[reshard_vars[i][k] for i in ckp_ws] for k in reshard_vars[0]}
+        # Conjoin and concat inner lists: dict[list[list]] -> dict[tensor]
+        reshard_vars = {k:torch.cat(sum(reshard_vars[k], []), dim=0) for k in reshard_vars}
+        # For each local worker, pull out relevant shard
+        reshard_state = [{} for _ in range(nworkers)]
+        for local_r in range(r*nworkers, r*nworkers+nworkers):
+            for k in reshard_vars:
+                val = reshard_vars[k]
+                reshard_state[local_r][k] = val[
+                    round(val.size(0)*local_r/(w*nworkers)) : round(val.size(0)*(local_r+1)/(w*nworkers))
+                ]
+        dstate["reshard"] = reshard_state
+
+    # Custom: if easy, flip labels; else concat and run custom fn
+    if easy_load:
+        custom_vars = torch.load(os.path.join(path, f"loader_custom_{r}.pth"))
+        # Flip dict[tuple[list]] into list[dict[tuple]]
+        custom_vars = [{k:(custom_vars[k][0][i], custom_vars[k][1]) for k in custom_vars} for i in range(nworkers)]
+        dstate["custom"] = custom_vars
+    else:
+        # Load all shards
+        custom_vars = [torch.load(os.path.join(path, f"loader_custom_{i}.pth")) for i in range(ckp_ws)]  # list[dict[tuple[list]]]
+        # Flip and fuse list[dict[tuple[list]]] into dict[tuple[list]]
+        custom_vars = {k:(sum([c[k][0] for c in custom_vars], []), custom_vars[0][k][1]) for k in custom_vars[0]}
+        # For each local worker, call custom fn to construct relevant shard
+        custom_state = [{} for _ in range(nworkers)]
+        for local_r in range(nworkers):
+            for k in custom_vars:
+                (vals, fn) = custom_vars[k]
+                custom_state[local_r][k] = (fn(vals, r*nworkers+local_r, w*nworkers), None)  # Needs to stay a tuple
+        dstate["custom"] = custom_state
+
+    # Flip dict[list[dict]] into list[dict[dict]]
+    dstate = [{k:dstate[k][i] for k in dstate} for i in range(nworkers)]
+    # Load worker dstates back into loader
     for i in range(nworkers):
-        state["_snapshot"]["_worker_snapshots"][f"worker_{i}"]["dataset_state"] = dstate[i]
-    # Load into loader
-    loader.load_state_dict(state)
+        base["_snapshot"]["_worker_snapshots"][f"worker_{i}"]["dataset_state"] = dstate[i]
+    loader.load_state_dict(base)
+
+
+def dummydata():
+    data = tempfile.TemporaryDirectory()
+    datapath = data.name
+    schema = pa.schema([pa.field("tokens", pa.uint32())])
+    with pa.ipc.new_file(
+        os.path.join(datapath, "fileshard_1.arrow"), schema
+    ) as writer:
+        for i in range(500):
+            out = list(range(i * 100, i * 100 + 100))
+            writer.write(pa.record_batch([out], schema=schema))
+    os.makedirs(os.path.join(datapath, "subfolder"))
+    with pa.ipc.new_file(
+        os.path.join(datapath, "subfolder/fileshard_2.arrow"), schema
+    ) as writer:
+        for i in range(500):
+            out = list(range(50000 + i * 100, 50000 + i * 100 + 100))
+            writer.write(pa.record_batch([out], schema=schema))
+    return data
+
+    
+    
+
