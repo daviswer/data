@@ -92,10 +92,11 @@ class _StatefulDataset(data.IterableDataset):
         self.state_vars: List[str] = []
         self.broadcast_vars: List[str] = []
         self.reshard_vars: List[str] = []
-        self.custom_vars: List[Tuple[str, Callable[[List[Any], int, int], Any]]] = []
-        # Every custom var must be bundled with a corresponding resharding function 
-        # that maps the list of prior values over workers, the rank, and the world size
-        # to the new value for this worker. This fn must be defined or imported inside this file.
+        self.custom_vars: List[str] = []
+        self.custom_fns: List[Callable[[List[Any]], Any]] = []
+        # Every custom var must be bundled with a corresponding custom resharding fn,
+        # which maps the list of prior values over workers to the new value for this worker. 
+        # It is recommended to define these fns as class methods, so that rank and worldsize are exposed.
 
     def setup(self):
         """
@@ -123,9 +124,10 @@ class _StatefulDataset(data.IterableDataset):
 
     def statename(self, x: str, rank=None):
         # Note that this naming convention implicitly disallows repeated layers in the dataset pipeline
-        out = self.__class__.__name__ + "." + x
+        out = self.__class__.__name__ + "."
         if rank is not None:
-            out = "rank" + str(rank) + "." + out
+            out += str(rank) + "."
+        out += x
         return out
 
     def state_dict(self):
@@ -136,11 +138,10 @@ class _StatefulDataset(data.IterableDataset):
         self.setup()
         out = {}
         for state_type,flags in zip(
-            ["state", "broadcast", "reshard"],
-            [self.state_vars, self.broadcast_vars, self.reshard_vars],
+            ["state", "broadcast", "reshard", "custom"],
+            [self.state_vars, self.broadcast_vars, self.reshard_vars, self.custom_vars],
         ):
             out[state_type] = {self.statename(flag): getattr(self, flag) for flag in flags}
-        out["custom"] = {self.statename(flag): (getattr(self, flag), fn) for flag,fn in self.custom_vars}
         # Deepcopy required to prevent in-place modification from later prefetches
         return deepcopy(out)
 
@@ -150,18 +151,23 @@ class _StatefulDataset(data.IterableDataset):
         """
         self.setup()
         for state_type,flags in zip(
-            ["state", "broadcast", "reshard"],
-            [self.state_vars, self.broadcast_vars, self.reshard_vars],
+            ["state", "broadcast", "reshard", "custom"],
+            [self.state_vars, self.broadcast_vars, self.reshard_vars, self.custom_vars],
         ):
             [setattr(self, flag, state_dict[state_type][self.statename(flag)]) for flag in flags]
-        # Assume that custom reshard fn has already been applied
-        [setattr(self, flag, state_dict["custom"][self.statename(flag)][0]) for flag,fn in self.custom_vars]
+        # Apply custom reshard fns to loaded custom values
+        [setattr(
+            self, 
+            self.custom_vars[i], 
+            self.custom_fns[i](getattr(self, self.custom_vars[i]))
+        ) for i in range(len(self.custom_vars))]
 
 
 class _NestedStatefulDataset(_StatefulDataset):
     """
     Stub for nested wrappers of _StatefulDatasets. Extends state fns with recursion.
     Requires a single instantiated sub-dataset (which may be replicated during setup fn).
+    The resulting self.dataset must either be a _StatefulDataset, or iterable of _StatefulDatasets.
     """
 
     def __init__(
@@ -191,21 +197,40 @@ class _NestedStatefulDataset(_StatefulDataset):
     def load_state_dict(self, state_dict):
         """
         Sets all specified flags at the current level, then recurses into wrapped dataset.
+        If multiple subdatasets are present, uses corresponding key prefixes.
         """
         self.setup()
         super().load_state_dict(state_dict)
-        self.dataset.load_state_dict(state_dict)
+        if isinstance(self.dataset, _StatefulDataset):
+            self.dataset.load_state_dict(state_dict)
+        else:
+            for i,subdata in enumerate(self.dataset):
+                prefix = self.statename("", i)
+                subdict = {state_type:{k[len(prefix):]:v} 
+                           for state_type in state_dict 
+                           for k,v in state_dict[state_type].items()
+                           if prefix in k}
+                subdata.load_state_dict(subdict)
 
     def state_dict(self):
         """
         Fetches state dict recursively from wrapped layers, then adds specified flags.
         Overlapping flags are overwritten by values from THIS layer.
+        If multiple subdatasets are present, prepends class name and index to the key string.
         """
         self.setup()
-        out = self.dataset.state_dict()
         state = super().state_dict()
-        for state_type in state.keys():
-            out[state_type].update(state[state_type])
+        if isinstance(self.dataset, _StatefulDataset):
+            out = self.dataset.state_dict()
+            for state_type in state.keys():
+                out[state_type].update(state[state_type])
+        else:
+            for i,subdata in enumerate(self.dataset):
+                substate = subdata.state_dict()
+                for state_type in state.keys():
+                    out[state_type].update(
+                        {self.statename(k,i):v for k,v in substate[state_type].items()}
+                    )
         return out
 
 
@@ -384,7 +409,8 @@ class ScalableReader(_StatefulDataset):
         self.shard_states = None  # shardid, file pos, doc pos, chunk pos, epoch   (reshardable state buffer)
 
         self.broadcast_vars = ["filesizes"]
-        self.custom_vars = [("shard_states", shard_rescale)]
+        self.custom_vars = ["shard_states"]
+        self.custom_fns = [self.shard_rescale]
 
         # TODO: add handling to prevent zero-length allocations
 
@@ -537,60 +563,59 @@ class ScalableReader(_StatefulDataset):
                 self.shard_states[i][4] += 1
             # Begin new epoch
     
-
-def shard_rescale(shard_states: List[torch.Tensor], rank: int, worldsize: int):
-    """
-    Custom function for rescaling of ScalableReader.shard_states
-    """
-    if len(shard_states) == worldsize:
-        return shard_states[rank]
-    else:
-        # Sort shards by epoch count
-        shard_states = torch.cat(shard_states, dim=0)
-        sorted, indices = torch.sort(shard_states[:,4], descending=True, stable=True)
-        shard_states = shard_states[indices]
-        # Strip out dummy padding shards
-        n_dummies = sorted.eq(torch.iinfo(torch.int).max).sum()
-        shard_states = shard_states[n_dummies:]  # n_logical 5
-        sorted = sorted[n_dummies:]
-        # Split into max and non-max epochs
-        n_complete = sorted.eq(sorted[0]).sum()
-        completed_shards = shard_states[:n_complete]
-        incomplete_shards = shard_states[n_complete:]
-        # Allocate completed shards
-        completed_shards = [
-            completed_shards[
-                round(i*len(completed_shards)/worldsize):
-                round((i+1)*len(completed_shards)/worldsize)
-            ] for i in range(worldsize)
-        ]
-        # Sort completed shards by length
-        completed_shards.sort(key=len)
-        # Allocate incomplete shards
-        incomplete_shards = [
-            incomplete_shards[
-                round(i*len(incomplete_shards)/worldsize):
-                round((i+1)*len(incomplete_shards)/worldsize)
-            ] for i in range(worldsize)
-        ]
-        # Reverse sort incomplete shards by length
-        # Minimizes padding by overallocating incomplete shards to underallocated complete shards
-        incomplete_shards.sort(key=len, reverse=True)
-        
-        # Pull out shard allocation for this worker
-        # (sort/reverse-sort ensures allocations are off by no more than 1)
-        shards = [
-            completed_shards[rank],
-            incomplete_shards[rank]
-        ]
-        shard_states = torch.cat(shards)
-        # Order shards by global ID (for steady file progression)
-        _, indices = shard_states[:,0].sort()
-        shard_states[:len(shard_states)] = shard_states[indices]
-        # Pad out with dummy shards if needed
-        shard_states[len(shard_states):,0] = -1
-        shard_states[len(shard_states):,4] = torch.iinfo(torch.int).max
-        return shard_states
+    def shard_rescale(self, shard_states: List[torch.Tensor]):
+        """
+        Custom function for rescaling of ScalableReader.shard_states
+        """
+        if len(shard_states) == self.worldsize:
+            return shard_states[self.rank]
+        else:
+            # Sort shards by epoch count
+            shard_states = torch.cat(shard_states, dim=0)
+            sorted, indices = torch.sort(shard_states[:,4], descending=True, stable=True)
+            shard_states = shard_states[indices]
+            # Strip out dummy padding shards
+            n_dummies = sorted.eq(torch.iinfo(torch.int).max).sum()
+            shard_states = shard_states[n_dummies:]  # n_logical 5
+            sorted = sorted[n_dummies:]
+            # Split into max and non-max epochs
+            n_complete = sorted.eq(sorted[0]).sum()
+            completed_shards = shard_states[:n_complete]
+            incomplete_shards = shard_states[n_complete:]
+            # Allocate completed shards
+            completed_shards = [
+                completed_shards[
+                    round(i*len(completed_shards)/self.worldsize):
+                    round((i+1)*len(completed_shards)/self.worldsize)
+                ] for i in range(self.worldsize)
+            ]
+            # Sort completed shards by length
+            completed_shards.sort(key=len)
+            # Allocate incomplete shards
+            incomplete_shards = [
+                incomplete_shards[
+                    round(i*len(incomplete_shards)/self.worldsize):
+                    round((i+1)*len(incomplete_shards)/self.worldsize)
+                ] for i in range(self.worldsize)
+            ]
+            # Reverse sort incomplete shards by length
+            # Minimizes padding by overallocating incomplete shards to underallocated complete shards
+            incomplete_shards.sort(key=len, reverse=True)
+            
+            # Pull out shard allocation for this worker
+            # (sort/reverse-sort ensures allocations are off by no more than 1)
+            shards = [
+                completed_shards[self.rank],
+                incomplete_shards[self.rank]
+            ]
+            shard_states = torch.cat(shards)
+            # Order shards by global ID (for steady file progression)
+            _, indices = shard_states[:,0].sort()
+            shard_states[:len(shard_states)] = shard_states[indices]
+            # Pad out with dummy shards if needed
+            shard_states[len(shard_states):,0] = -1
+            shard_states[len(shard_states):,4] = torch.iinfo(torch.int).max
+            return shard_states
 
 
 #### -------------------------    CHECKPOINT FUNCTIONS    ------------------------- ####
@@ -643,8 +668,8 @@ def save_ckpt_custom(
     # Custom dict: Aggregate lists of (val,fn) tuples into tuples of (list[val], fn)
     # (assumes fn is consistent across ranks)
     custom_vars = dstate["custom"]
-    # Flip list[dict[tuple]] into dict[tuple[list]]
-    custom_vars = {k:([d[k][0] for d in custom_vars], custom_vars[0][k][1]) for k in custom_vars[0].keys()}
+    # Flip list[dict] into dict[list]
+    custom_vars = {k:[d[k] for d in custom_vars] for k in custom_vars[0].keys()}
     torch.save(
         custom_vars,
         os.path.join(path, f"loader_custom_{rank}.pth"),
@@ -712,21 +737,16 @@ def load_ckpt_custom(
     # Custom: if easy, flip labels; else concat and run custom fn
     if easy_load:
         custom_vars = torch.load(os.path.join(path, f"loader_custom_{r}.pth"))
-        # Flip dict[tuple[list]] into list[dict[tuple]]
-        custom_vars = [{k:(custom_vars[k][0][i], custom_vars[k][1]) for k in custom_vars} for i in range(nworkers)]
+        # Flip dict[list] into list[dict]
+        custom_vars = [{k:custom_vars[k][i] for k in custom_vars} for i in range(nworkers)]
         dstate["custom"] = custom_vars
     else:
         # Load all shards
         custom_vars = [torch.load(os.path.join(path, f"loader_custom_{i}.pth")) for i in range(ckp_ws)]  # list[dict[tuple[list]]]
-        # Flip and fuse list[dict[tuple[list]]] into dict[tuple[list]]
-        custom_vars = {k:(sum([c[k][0] for c in custom_vars], []), custom_vars[0][k][1]) for k in custom_vars[0]}
-        # For each local worker, call custom fn to construct relevant shard
-        custom_state = [{} for _ in range(nworkers)]
-        for local_r in range(nworkers):
-            for k in custom_vars:
-                (vals, fn) = custom_vars[k]
-                custom_state[local_r][k] = (fn(vals, r*nworkers+local_r, w*nworkers), None)  # Needs to stay a tuple
-        dstate["custom"] = custom_state
+        # Flip and fuse list[dict[list]] into dict[list]
+        custom_vars = {k:sum([c[k] for c in custom_vars], []) for k in custom_vars[0]}
+        # Expand dict[list] to list[dict[list]] via replication
+        dstate["custom"] = [custom_vars] * nworkers
 
     # Flip dict[list[dict]] into list[dict[dict]]
     dstate = [{k:dstate[k][i] for k in dstate} for i in range(nworkers)]
@@ -755,6 +775,22 @@ def dummydata():
             writer.write(pa.record_batch([out], schema=schema))
     return data
 
-    
-    
+def dummytest():
+    data = dummydata()
+    path=data.name
+    test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
+    l = StatefulDataLoader(test, batch_size=1, num_workers=2)
+    for i,out in enumerate(l):
+        if i==463:
+            break
+    save_ckpt_custom(l, path)
+    print(l.state_dict())
+
+    test2 = ScalableReader(path, 2, 5, ArrowHandler, -1, n_logical_shards=10)
+    l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
+    load_ckpt_custom(l2, path)
+    out = iter(l2)
+    print(next(out)[0])
+    print(l2.state_dict())
+
 
