@@ -13,6 +13,7 @@ import torch
 # import torch.distributed.tensor as dtensor
 # import torch.distributed as dist
 import torch.utils.data as data
+from torch.utils.data import DataLoader
 
 from .stateful_dataloader import StatefulDataLoader
 
@@ -359,6 +360,105 @@ class PreprocessDataset(_NestedStatefulDataset):
 
 #### -------------------------    NEW CODE STARTS HERE    ------------------------- ####
 
+
+class ShuffleDataset(_NestedStatefulDataset):
+    """
+    Wrapper for a StatefulDataset that implements data shuffling via a single in/out buffer.
+    Fills buffer two at a time, up to desired size, then switches to one at a time to maintain size.
+    Passes randomly sampled outputs one by one.
+    Ensures local mixing of data without relying on sliding windows or shuffling of large buffers.
+    Any two consecutive inputs will be separated by window_size steps in expectation.
+    Rescaling-enabled: buffers that shrink will re-grow to window_size,
+    buffers that expand will shrink back down to window_size.
+    Sequences retrieved from the wrapped StatefulDataset must all be the same length.
+    ...
+    Args
+    ----
+    dataset : _StatefulDataset
+        Fully instantiated dataset
+    window_size : int
+        Max size of input/output buffer
+    """
+
+    def __init__(self, dataset: _StatefulDataset, window_size: int):
+        super().__init__(dataset)
+        assert (
+            window_size > 1
+        ), f"Window size {window_size} must be greater than 1 for shuffling to occur"
+        self.window_size = window_size
+        self.g_state = None
+        self.generator = None
+        self.buffer: List[List[Any]] = []
+        self.buffer_size = 0
+        self.state_vars = ["g_state"]
+        self.reshard_vars = ["buffer"]
+
+    def setup(self):
+        super().setup()
+        self.generator = torch.Generator().manual_seed(self.rank)
+
+    def __iter__(self):
+        self.setup()
+        dataset = iter(self.dataset)
+        # Pad out buffer if needed
+        self._pad_buffer()
+        first_draw = next(dataset)
+        while True:
+            # If buffer entries have wrong length, reset buffer
+            if len(first_draw) != len(self.buffer[0]):
+                self.buffer = []
+                self.buffer_size = 0
+                self._pad_buffer()
+
+            # If buffer is undersized, add a datapoint
+            if self.buffer_size < self.window_size:
+                self.buffer[self.buffer_size] = next(dataset) if self.buffer_size > 0 else first_draw
+                self.buffer_size += 1
+
+            # Swap out randomly sampled value from buffer.
+            # If buffer is small, add new item.
+            # If buffer is large, pop last item into that slot.
+            i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
+            # if self.rank == 0:
+            #     print(i, self.buffer_size, self.generator.get_state().tolist()[:16])
+            # else:
+            #     print("\t\t\t\t", i, self.buffer_size)
+            out = self.buffer[i]
+            if self.buffer_size > self.window_size:
+                self.buffer[i] = self.buffer[self.buffer_size - 1]
+                self.buffer_size -= 1
+            else:
+                self.buffer[i] = next(dataset)
+            yield out
+
+    def _pad_buffer(self):
+        if len(self.buffer) < self.window_size:
+            self.buffer += [
+                [],
+            ] * (self.window_size - len(self.buffer))
+
+    def state_dict(self):
+        # Create generator if it doesn't already exist
+        self.setup()
+        # Write generator state manually
+        self.g_state = self.generator.get_state()
+        # Prune buffer so it can be resharded in future
+        self.buffer = torch.tensor(self.buffer[: self.buffer_size])
+        out = super().state_dict()
+        # Pad buffer back out again
+        self.buffer = self.buffer.tolist()
+        self._pad_buffer()
+        return out
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        self.buffer = self.buffer.tolist()
+        # Manually set generator state if it exists
+        if self.g_state is not None:
+            self.generator.set_state(self.g_state)
+        # Manually set buffer size
+        self.buffer_size = len(self.buffer)
+        
 
 class DocPackingDataset(_NestedStatefulDataset):
     """
@@ -915,7 +1015,6 @@ def dummytest():
     print(next(out)[0])
     print(l2.state_dict())
 
-
 def docpacktest():
     data = dummydata()
     path=data.name
@@ -930,6 +1029,30 @@ def docpacktest():
 
     test2 = ScalableReader(path, 0, 5, ArrowHandler, -1, n_logical_shards=10)
     test2 = DocPackingDataset(test2, 30, 8, -1, -2, 2)
+    l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
+    load_ckpt_custom(l2, path)
+    out = iter(l2)
+    print(next(out))
+    print(next(out))
+    print(next(out))
+    print(l2.state_dict())
+
+def shuffletest():
+    data = dummydata()
+    path=data.name
+    test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
+    test = ShuffleDataset(test, 4)
+    # l = DataLoader(test, batch_size=1, num_workers=1)
+    l = StatefulDataLoader(test, batch_size=1, num_workers=1)
+    for i,out in enumerate(l):
+        if i==480:
+            break
+    # return
+    save_ckpt_custom(l, path)
+    print(l.state_dict())
+
+    test2 = ScalableReader(path, 0, 5, ArrowHandler, -1, n_logical_shards=10)
+    test2 = ShuffleDataset(test2, 4)
     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
     load_ckpt_custom(l2, path)
     out = iter(l2)
