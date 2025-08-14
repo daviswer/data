@@ -397,8 +397,9 @@ class DocPackingDataset(_NestedStatefulDataset):
         slack_after = slack.sub(len(doc))
         slack_after += slack_after.sign().clamp(min=-1,max=0).neg().mul(1e12).long()
         best_bin = slack_after.argmin().item()
-        self.bins[best_bin][-slack[best_bin].item():-slack[best_bin].item()+len(doc)] = doc
-
+        start = self.len - slack[best_bin].item()
+        self.bins[best_bin][start:start+len(doc)] = doc
+        
     def __iter__(self):
         self.setup()
         dataset = iter(self.dataset)
