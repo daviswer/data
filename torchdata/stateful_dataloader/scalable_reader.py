@@ -387,9 +387,14 @@ class DocPackingDataset(_NestedStatefulDataset):
         self.nbins = n_bins
         self.bins = []
         self.reshard_vars = ["bins"]
+        self.dummy = -100
+        if self.dummy == self.pad:
+            self.dummy -= 1
+        if self.dummy == self.delimiter:
+            self.dummy -= 1
 
     def _available_bins(self, targ):
-        slack = torch.tensor(self.bins).eq(self.pad).flip(dims=(1,)).cumprod(dim=1).sum(dim=1)
+        slack = torch.tensor(self.bins).eq(self.dummy).flip(dims=(1,)).cumprod(dim=1).sum(dim=1)
         n_available = slack.ge(targ).int().sum().item()
         return n_available, slack
     
@@ -405,22 +410,28 @@ class DocPackingDataset(_NestedStatefulDataset):
         dataset = iter(self.dataset)
         # If seq len doesn't match current bucket size, dump current buckets
         if len(self.bins) == 0 or len(self.bins[0]) != self.len:
-            self.bins = [[self.pad]*self.len]
+            self.bins = [[self.dummy]*self.len]
         
         while True:
             # Flush any sufficiently full buckets
             n_underfull,slack = self._available_bins(self.npads+1)
             n_yield = len(self.bins) - n_underfull
             if n_yield > 0:
-                self.bins.sort(key=lambda x: torch.tensor(x).eq(self.pad).flip(dims=(0,)).cumprod(dim=0).sum().neg())
+                self.bins.sort(key=lambda x: torch.tensor(x).eq(self.dummy).flip(dims=(0,)).cumprod(dim=0).sum().neg())
                 for i in range(n_yield):
                     # Count forward to flush oldest buckets (of same length) first
-                    yield self.bins.pop(i-n_yield)
+                    out = self.bins.pop(i-n_yield)
+                    # Replace any dummy tokens with pads
+                    n_dummies = slack[i-n_yield].item()
+                    if n_dummies > 0:
+                        out[-n_dummies:] = [self.pad] * n_dummies
+                    yield out
+                slack = slack[:-n_yield]
 
             # If bin count is under target and no empty bins already exist, 
             # add a single new empty bin (grow smoothly to run smoothly)
             if slack.max() < self.len and len(self.bins) < self.nbins:
-                self.bins.append([self.pad]*self.len)
+                self.bins.append([self.dummy]*self.len)
 
             # Fetch a doc
             doc = []
@@ -455,7 +466,7 @@ class DocPackingDataset(_NestedStatefulDataset):
                         self._bin_insert(slack, doc)
                     else:
                         # Don't re-truncate, just create a new bin
-                        self.bins.append(doc + [self.pad] * (self.len - len(doc)))
+                        self.bins.append(doc + [self.dummy] * (self.len - len(doc)))
 
     def state_dict(self):
         # Convert self.bins to tensor
