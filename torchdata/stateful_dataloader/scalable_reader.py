@@ -360,6 +360,116 @@ class PreprocessDataset(_NestedStatefulDataset):
 #### -------------------------    NEW CODE STARTS HERE    ------------------------- ####
 
 
+class DocPackingDataset(_NestedStatefulDataset):
+    """
+    Packs and slices variable-length documents into constant-length training sequences,
+    attempting to minimize truncation. Maintains a list of buffers, draws a full document
+    (until delimiter token is reached), and attempts to fit that document (or document remainder,
+    when document is longer than target sequence length) into the fullest buffer that can contain it.
+    When the number of right-padding tokens in a buffer falls below the specified threshold, that buffer
+    is passed as the next sequence output. Number of buffers is set roughly to n_bins, but may rise/fall
+    as documents and fragments are added/flushed. Buffers are redistributed over workers when rescaling.
+    """
+    def __init__(
+            self,
+            dataset: _StatefulDataset,
+            seq_len: int,
+            n_pads: int,
+            delimiter_token: Any,
+            pad_token: Any,
+            n_bins: int = 100,
+    ):
+        super().__init__(dataset)
+        self.len = seq_len
+        self.delimiter = delimiter_token
+        self.pad = pad_token
+        self.npads = n_pads
+        self.nbins = n_bins
+        self.bins = []
+        self.reshard_vars = ["bins"]
+
+    def _available_bins(self, targ):
+        slack = torch.tensor(self.bins).eq(self.pad).flip(dims=(1,)).cumprod(dim=1).sum(dim=1)
+        n_available = slack.ge(targ).int().sum().item()
+        return n_available, slack
+    
+    def _bin_insert(self, slack, doc):
+        slack_after = slack.sub(len(doc))
+        slack_after += slack_after.sign().clamp(min=-1,max=0).neg().mul(1e12).long()
+        best_bin = slack_after.argmin().item()
+        self.bins[best_bin][-slack[best_bin].item():-slack[best_bin].item()+len(doc)] = doc
+
+    def __iter__(self):
+        self.setup()
+        dataset = iter(self.dataset)
+        # If seq len doesn't match current bucket size, dump current buckets
+        if len(self.bins) == 0 or len(self.bins[0]) != self.len:
+            self.bins = [[self.pad]*self.len]
+        
+        while True:
+            # Flush any sufficiently full buckets
+            n_underfull,slack = self._available_bins(self.npads+1)
+            n_yield = len(self.bins) - n_underfull
+            if n_yield > 0:
+                self.bins.sort(key=lambda x: torch.tensor(x).eq(self.pad).flip(dims=(0,)).cumprod(dim=0).sum().neg())
+                for i in range(n_yield):
+                    # Count forward to flush oldest buckets (of same length) first
+                    yield self.bins.pop(i-n_yield)
+
+            # If bin count is under target and no empty bins already exist, 
+            # add a single new empty bin (grow smoothly to run smoothly)
+            if slack.max() < self.len and len(self.bins) < self.nbins:
+                self.bins.append([self.pad]*self.len)
+
+            # Fetch a doc
+            doc = []
+            doc_trunc = False
+            while len(doc)==0 or doc[-1] != self.delimiter:
+                doc += next(dataset)
+            # If doc is large, add as many full buckets as needed
+            while len(doc) > self.len:
+                self.bins.append(doc[:self.len])
+                doc = doc[self.len:]
+                doc_trunc = True
+
+            # Insert (remaining) doc into existing buckets
+            if len(doc) > 0:
+                # Determine if doc fits into existing buckets
+                n_available,slack = self._available_bins(len(doc))
+                if n_available > 0:
+                    # Add doc to fullest available bin
+                    self._bin_insert(slack, doc)
+                else:
+                    # If doc isn't truncated, or we have too many bins, 
+                    # truncate and fill one bin before adding another
+                    if not doc_trunc or len(self.bins) >= self.nbins:
+                        # Find the fullest non-full bin
+                        best_bin = slack.add(slack.sign().sub(1).neg().mul(1e12).long()).argmin().item()
+                        self.bins[best_bin][-slack[best_bin].item():] = doc[:slack[best_bin].item()]
+                        doc = doc[slack[best_bin].item():]
+                        n_available,slack = self._available_bins(len(doc))
+                    # Repeat the fit-check since above code might have shortened the doc fragment
+                    if n_available > 0:
+                        # Add doc to fullest available bin
+                        self._bin_insert(slack, doc)
+                    else:
+                        # Don't re-truncate, just create a new bin
+                        self.bins.append(doc + [self.pad] * (self.len - len(doc)))
+
+    def state_dict(self):
+        # Convert self.bins to tensor
+        self.bins = torch.tensor(self.bins)
+        out = super().state_dict()
+        # Convert tensor back to nested list
+        self.bins = self.bins.tolist()
+        return out
+    
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        # Convert tensor to nested list
+        self.bins = self.bins.tolist()
+    
+    
 class ScalableReader(_StatefulDataset):
     """
     Maintains n x 5 state buffer where n is the number of logical shards owned by this worker,
@@ -721,7 +831,7 @@ def load_ckpt_custom(
         # Load all shards
         reshard_vars = [torch.load(os.path.join(path, f"loader_reshard_{i}.pth")) for i in range(ckp_ws)]  # list[dict[list]]
         # Flip list[dict[list]] to dict[list[list]]
-        reshard_vars = {k:[reshard_vars[i][k] for i in ckp_ws] for k in reshard_vars[0]}
+        reshard_vars = {k:[reshard_vars[i][k] for i in range(ckp_ws)] for k in reshard_vars[0]}
         # Conjoin and concat inner lists: dict[list[list]] -> dict[tensor]
         reshard_vars = {k:torch.cat(sum(reshard_vars[k], []), dim=0) for k in reshard_vars}
         # For each local worker, pull out relevant shard
@@ -794,3 +904,24 @@ def dummytest():
     print(l2.state_dict())
 
 
+def docpacktest():
+    data = dummydata()
+    path=data.name
+    test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
+    test = DocPackingDataset(test, 30, 0, -1, -2, 4)
+    l = StatefulDataLoader(test, batch_size=1, num_workers=2)
+    for i,out in enumerate(l):
+        if i==480:
+            break
+    save_ckpt_custom(l, path)
+    print(l.state_dict())
+
+    test2 = ScalableReader(path, 0, 5, ArrowHandler, -1, n_logical_shards=10)
+    test2 = DocPackingDataset(test2, 30, 8, -1, -2, 2)
+    l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
+    load_ckpt_custom(l2, path)
+    out = iter(l2)
+    print(next(out))
+    print(next(out))
+    print(next(out))
+    print(l2.state_dict())
