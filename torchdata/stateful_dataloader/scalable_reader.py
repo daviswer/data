@@ -222,17 +222,17 @@ class _NestedStatefulDataset(_StatefulDataset):
         self.setup()
         state = super().state_dict()
         if isinstance(self.dataset, _StatefulDataset):
-            out = self.dataset.state_dict()
+            substate = self.dataset.state_dict()
             for state_type in state.keys():
-                out[state_type].update(state[state_type])
+                state[state_type].update(substate[state_type])
         else:
             for i,subdata in enumerate(self.dataset):
                 substate = subdata.state_dict()
                 for state_type in state.keys():
-                    out[state_type].update(
+                    state[state_type].update(
                         {self.statename(k,i):v for k,v in substate[state_type].items()}
                     )
-        return out
+        return state
 
 
 #### -------------------------    FILE HANDLERS    ------------------------- ####
@@ -396,7 +396,7 @@ class ShuffleDataset(_NestedStatefulDataset):
     def setup(self):
         if not self.is_setup:
             self.generator = torch.Generator().manual_seed(self.rank)
-        super().setup()            
+        super().setup()
 
     def __iter__(self):
         self.setup()
@@ -455,6 +455,116 @@ class ShuffleDataset(_NestedStatefulDataset):
             self.generator.set_state(self.g_state)
         # Manually set buffer size
         self.buffer_size = len(self.buffer)
+
+
+class SamplingDataset(_NestedStatefulDataset):
+    """
+    A _NestedStatefulDataset implementing percentage-based sampling: weights can be floats, and the
+    number of tokens seen from each subdataset will match those weights as closely as possible.
+    This is accomplished by maintaining a _StatefulDataset for each subdataset, and tracking
+    the number of tokens emitted by each. Whichever loader is furthest from its target will be
+    the next to pass a document.
+    ...
+    Args
+    ----
+    datapath : str
+        Absolute path to the dataset directory. Expects directory to contain subfolders,
+        which in turn contain shard files.
+    dataset : _StatefulDataset
+        Fully instantiated dataset. Cloned across desired subdatasets during setup.
+    delimiter_token : Any
+        Token used to indicate sequence/document breaks. Type should match data type.
+    datasets : list[str] | None
+        A list of subdatasets to draw from. If None, draws from all subfolders of datapath.
+    weights : list(float) | None
+        Weights describing what percent of emitted tokens should come from each subdataset.
+        Need not sum to 1. If None, tokens are drawn evenly.
+    verbose : bool
+        Track setup progress?
+    """
+
+    def __init__(
+        self,
+        datapath: str,
+        dataset: _StatefulDataset,
+        delimiter_token: Any,
+        datasets=None,
+        weights=None,
+        verbose=False,
+    ):
+        super().__init__(dataset)
+        self.datapath = datapath
+        self.delimiter = delimiter_token
+        self.verbose = verbose
+        self.datasets = (
+            datasets
+            if datasets is not None
+            else [
+                f
+                for f in os.listdir(datapath)
+                if not os.path.isfile(os.path.join(datapath, f))
+            ]
+        )
+        assert len(self.datasets) > 0, "You must specify at least one dataset"
+        for d in datasets:
+            assert os.path.exists(
+                os.path.join(datapath, d)
+            ), f"Invalid subdataset path: {os.path.join(datapath, d)}"
+
+        if weights is not None:
+            assert len(weights) == len(
+                self.datasets
+            ), f"Number of oversample weights {len(weights)} must match number of datasets {len(self.datasets)}"
+            for w in weights:
+                assert w > 0, f"Sampling rate {w} must be positive"
+        self.weights = [1] * len(self.datasets) if weights is None else weights
+        self.weights = [w / sum(self.weights) for w in self.weights]
+
+        self.tokens_seen = [0] * len(self.datasets)
+
+        self.current_iterator = -1
+        self.state_vars = ["tokens_seen", "current_iterator"]
+
+    def setup(self):
+        if not self.is_setup:
+            _StatefulDataset.setup(self)
+            # Build subdataset iterators
+            data = []
+            for i, d in enumerate(self.datasets):
+                data.append(deepcopy(self.dataset))
+                data[-1].datapath = os.path.join(self.datapath, d)
+                data[-1].rank = self.rank
+                data[-1].worldsize = self.worldsize
+                data[-1].local_worldsize = self.local_worldsize
+                if self.verbose and self.rank == 0:
+                    print(
+                        f"Assembled subdataset iterator for {d}, {i+1} of {len(self.datasets)}"
+                    )
+            self.dataset = data
+            [d.setup() for d in data]
+
+    def __iter__(self):
+        self.setup()
+        # Grab one doc at a time in random order
+        data = [iter(d) for d in self.dataset]
+        while True:
+            if self.current_iterator != -1:
+                # Finish current document
+                out = next(data[self.current_iterator])
+                self.tokens_seen[self.current_iterator] += len(out)
+                if out[-1] == self.delimiter:
+                    self.current_iterator = -1
+                yield out
+            else:
+                # Choose new subdataset to draw from
+                # (whichever is currently most underrepresented compared to target rate)
+                offset = [
+                    self.weights[i]
+                    - self.tokens_seen[i] / (sum(self.tokens_seen) + 1e-9)
+                    for i in range(len(self.datasets))
+                ]
+                offset_argmax = max((diff, i) for i, diff in enumerate(offset))[1]
+                self.current_iterator = offset_argmax
         
 
 class DocPackingDataset(_NestedStatefulDataset):
@@ -515,6 +625,7 @@ class DocPackingDataset(_NestedStatefulDataset):
             n_yield = len(self.bins) - n_underfull
             if n_yield > 0:
                 self.bins.sort(key=lambda x: torch.tensor(x).eq(self.dummy).flip(dims=(0,)).cumprod(dim=0).sum().neg())
+                n_underfull,slack = self._available_bins(self.npads+1)
                 for i in range(n_yield):
                     # Count forward to flush oldest buckets (of same length) first
                     out = self.bins.pop(i-n_yield)
@@ -527,7 +638,7 @@ class DocPackingDataset(_NestedStatefulDataset):
 
             # If bin count is under target and no empty bins already exist, 
             # add a single new empty bin (grow smoothly to run smoothly)
-            if slack.max() < self.len and len(self.bins) < self.nbins:
+            if len(self.bins) == 0 or (slack.max() < self.len and len(self.bins) < self.nbins):
                 self.bins.append([self.dummy]*self.len)
 
             # Fetch a doc
@@ -974,85 +1085,3 @@ def load_ckpt_custom(
         base["_snapshot"]["_worker_snapshots"][f"worker_{i}"]["dataset_state"] = dstate[i]
     loader.load_state_dict(base)
 
-
-def dummydata():
-    data = tempfile.TemporaryDirectory()
-    datapath = data.name
-    schema = pa.schema([pa.field("tokens", pa.uint32())])
-    with pa.ipc.new_file(
-        os.path.join(datapath, "fileshard_1.arrow"), schema
-    ) as writer:
-        for i in range(500):
-            out = list(range(i * 100, i * 100 + 100))
-            writer.write(pa.record_batch([out], schema=schema))
-    os.makedirs(os.path.join(datapath, "subfolder"))
-    with pa.ipc.new_file(
-        os.path.join(datapath, "subfolder/fileshard_2.arrow"), schema
-    ) as writer:
-        for i in range(500):
-            out = list(range(50000 + i * 100, 50000 + i * 100 + 100))
-            writer.write(pa.record_batch([out], schema=schema))
-    return data
-
-def dummytest():
-    data = dummydata()
-    path=data.name
-    test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
-    l = StatefulDataLoader(test, batch_size=1, num_workers=2)
-    for i,out in enumerate(l):
-        if i==463:
-            break
-    save_ckpt_custom(l, path)
-    print(l.state_dict())
-
-    test2 = ScalableReader(path, 2, 5, ArrowHandler, -1, n_logical_shards=10)
-    l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
-    load_ckpt_custom(l2, path)
-    out = iter(l2)
-    print(next(out)[0])
-    print(l2.state_dict())
-
-def docpacktest():
-    data = dummydata()
-    path=data.name
-    test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
-    test = DocPackingDataset(test, 30, 0, -1, -2, 4)
-    l = StatefulDataLoader(test, batch_size=1, num_workers=2)
-    for i,out in enumerate(l):
-        if i==480:
-            break
-    save_ckpt_custom(l, path)
-    print(l.state_dict())
-
-    test2 = ScalableReader(path, 0, 5, ArrowHandler, -1, n_logical_shards=10)
-    test2 = DocPackingDataset(test2, 30, 8, -1, -2, 2)
-    l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
-    load_ckpt_custom(l2, path)
-    out = iter(l2)
-    print(next(out))
-    print(next(out))
-    print(next(out))
-    print(l2.state_dict())
-
-def shuffletest():
-    data = dummydata()
-    path=data.name
-    test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
-    test = ShuffleDataset(test, 4)
-    l = StatefulDataLoader(test, batch_size=1, num_workers=1)
-    for i,out in enumerate(l):
-        if i==480:
-            break
-    # return
-    save_ckpt_custom(l, path)
-    print(l.state_dict())
-
-    test2 = ScalableReader(path, 3, 5, ArrowHandler, -1, n_logical_shards=10)
-    test2 = ShuffleDataset(test2, 4)
-    l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
-    load_ckpt_custom(l2, path)
-    out = iter(l2)
-    print(next(out))
-    print(next(out))
-    print(next(out))
-    print(l2.state_dict())
