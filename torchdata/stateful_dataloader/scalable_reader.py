@@ -394,8 +394,9 @@ class ShuffleDataset(_NestedStatefulDataset):
         self.reshard_vars = ["buffer"]
 
     def setup(self):
-        super().setup()
-        self.generator = torch.Generator().manual_seed(self.rank)
+        if not self.is_setup:
+            self.generator = torch.Generator().manual_seed(self.rank)
+        super().setup()            
 
     def __iter__(self):
         self.setup()
@@ -419,10 +420,6 @@ class ShuffleDataset(_NestedStatefulDataset):
             # If buffer is small, add new item.
             # If buffer is large, pop last item into that slot.
             i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
-            # if self.rank == 0:
-            #     print(i, self.buffer_size, self.generator.get_state().tolist()[:16])
-            # else:
-            #     print("\t\t\t\t", i, self.buffer_size)
             out = self.buffer[i]
             if self.buffer_size > self.window_size:
                 self.buffer[i] = self.buffer[self.buffer_size - 1]
@@ -951,7 +948,7 @@ def load_ckpt_custom(
         for local_r in range(r*nworkers, r*nworkers+nworkers):
             for k in reshard_vars:
                 val = reshard_vars[k]
-                reshard_state[local_r][k] = val[
+                reshard_state[local_r-r*nworkers][k] = val[
                     round(val.size(0)*local_r/(w*nworkers)) : round(val.size(0)*(local_r+1)/(w*nworkers))
                 ]
         dstate["reshard"] = reshard_state
@@ -1042,7 +1039,6 @@ def shuffletest():
     path=data.name
     test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
     test = ShuffleDataset(test, 4)
-    # l = DataLoader(test, batch_size=1, num_workers=1)
     l = StatefulDataLoader(test, batch_size=1, num_workers=1)
     for i,out in enumerate(l):
         if i==480:
@@ -1051,7 +1047,7 @@ def shuffletest():
     save_ckpt_custom(l, path)
     print(l.state_dict())
 
-    test2 = ScalableReader(path, 0, 5, ArrowHandler, -1, n_logical_shards=10)
+    test2 = ScalableReader(path, 3, 5, ArrowHandler, -1, n_logical_shards=10)
     test2 = ShuffleDataset(test2, 4)
     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
     load_ckpt_custom(l2, path)
