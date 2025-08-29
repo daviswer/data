@@ -559,11 +559,11 @@ class SamplingDataset(_NestedStatefulDataset):
                 # Choose new subdataset to draw from
                 # (whichever is currently most underrepresented compared to target rate)
                 offset = [
-                    self.weights[i]
-                    - self.tokens_seen[i] / (sum(self.tokens_seen) + 1e-9)
+                    self.tokens_seen[i]
+                    - self.weights[i] * sum(self.tokens_seen)
                     for i in range(len(self.datasets))
                 ]
-                offset_argmax = max((diff, i) for i, diff in enumerate(offset))[1]
+                offset_argmax = min((diff, i) for i, diff in enumerate(offset))[1]
                 self.current_iterator = offset_argmax
         
 
@@ -742,8 +742,6 @@ class ScalableReader(_StatefulDataset):
         self.custom_vars = ["shard_states"]
         self.custom_fns = [self.shard_rescale]
 
-        # TODO: add handling to prevent zero-length allocations
-
     def _get_shard_breakdown(self, rank, nshards):
         """
         Retrieve the set of (fractional) files assigned to a given logical shard
@@ -852,6 +850,7 @@ class ScalableReader(_StatefulDataset):
         self._pre_iter()
         reader = None
         ndocs = -1
+        has_yielded = False
         while True:
             # Isolate undervisited shards
             epoch_count = self.shard_states[:,4].min().item()
@@ -883,6 +882,7 @@ class ScalableReader(_StatefulDataset):
                             self.shard_states[i][3] = chunk_pos+1
                             # Yield chunk
                             yield self._construct_chunk(chunk_pos, doc, nchunks)
+                            has_yielded = True
                         # Reset chunk_pos after finishing doc
                         self.shard_states[i][3] = 0
                     # Reset doc_pos after finishing file
@@ -892,6 +892,7 @@ class ScalableReader(_StatefulDataset):
                 # Increase epoch count after finishing shard
                 self.shard_states[i][4] += 1
             # Begin new epoch
+            assert has_yielded, f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents!"
     
     def shard_rescale(self, shard_states: List[torch.Tensor]):
         """
@@ -1085,3 +1086,136 @@ def load_ckpt_custom(
         base["_snapshot"]["_worker_snapshots"][f"worker_{i}"]["dataset_state"] = dstate[i]
     loader.load_state_dict(base)
 
+
+# def dummydata():
+#     data = tempfile.TemporaryDirectory()
+#     datapath = data.name
+#     schema = pa.schema([pa.field("tokens", pa.uint32())])
+#     os.makedirs(os.path.join(datapath, "subdataset"))
+#     with pa.ipc.new_file(
+#         os.path.join(datapath, "subdataset/fileshard_1.arrow"), schema
+#     ) as writer:
+#         for i in range(500):
+#             out = list(range(i * 100, i * 100 + 100))
+#             writer.write(pa.record_batch([out], schema=schema))
+#     os.makedirs(os.path.join(datapath, "subfolder"))
+#     with pa.ipc.new_file(
+#         os.path.join(datapath, "subfolder/fileshard_2.arrow"), schema
+#     ) as writer:
+#         for i in range(500):
+#             out = list(range(50000 + i * 100, 50000 + i * 100 + 100))
+#             writer.write(pa.record_batch([out], schema=schema))
+#     return data
+
+# def dummytest():
+#     data = dummydata()
+#     path=data.name
+#     test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
+#     l = StatefulDataLoader(test, batch_size=1, num_workers=2)
+#     for i,out in enumerate(l):
+#         if i==463:
+#             break
+#     save_ckpt_custom(l, path)
+#     print(l.state_dict())
+
+#     test2 = ScalableReader(path, 2, 5, ArrowHandler, -1, n_logical_shards=10)
+#     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
+#     load_ckpt_custom(l2, path)
+#     out = iter(l2)
+#     print(next(out)[0])
+#     print(l2.state_dict())
+
+# def docpacktest():
+#     data = dummydata()
+#     path=data.name
+#     test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
+#     test = DocPackingDataset(test, 30, 0, -1, -2, 4)
+#     l = StatefulDataLoader(test, batch_size=1, num_workers=2)
+#     for i,out in enumerate(l):
+#         if i==480:
+#             break
+#     save_ckpt_custom(l, path)
+#     print(l.state_dict())
+
+#     test2 = ScalableReader(path, 0, 5, ArrowHandler, -1, n_logical_shards=10)
+#     test2 = DocPackingDataset(test2, 30, 8, -1, -2, 2)
+#     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
+#     load_ckpt_custom(l2, path)
+#     out = iter(l2)
+#     print(next(out))
+#     print(next(out))
+#     print(next(out))
+#     print(l2.state_dict())
+
+# def shuffletest():
+#     data = dummydata()
+#     path=data.name
+#     test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
+#     test = ShuffleDataset(test, 4)
+#     l = StatefulDataLoader(test, batch_size=1, num_workers=1)
+#     for i,out in enumerate(l):
+#         if i==480:
+#             break
+#     # return
+#     save_ckpt_custom(l, path)
+#     print(l.state_dict())
+
+#     test2 = ScalableReader(path, 3, 5, ArrowHandler, -1, n_logical_shards=10)
+#     test2 = ShuffleDataset(test2, 4)
+#     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
+#     load_ckpt_custom(l2, path)
+#     out = iter(l2)
+#     print(next(out))
+#     print(next(out))
+#     print(next(out))
+#     print(l2.state_dict())
+
+# def sampletest():
+#     data = dummydata()
+#     path=data.name
+#     test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
+#     test = SamplingDataset(path, test, -1, ["subdataset", "subfolder"], [2,1])
+#     l = StatefulDataLoader(test, batch_size=1, num_workers=1)
+#     for i,out in enumerate(l):
+#         if i==48:
+#             break
+#     # return
+#     save_ckpt_custom(l, path)
+#     print(l.state_dict())
+
+#     test2 = ScalableReader(path, 3, 5, ArrowHandler, -1, n_logical_shards=10)
+#     test2 = SamplingDataset(path, test2, -1, ["subdataset", "subfolder"], [2,1])
+#     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
+#     load_ckpt_custom(l2, path)
+#     out = iter(l2)
+#     print(next(out))
+#     print(next(out))
+#     print(next(out))
+#     print(l2.state_dict())
+
+# def fulltest():
+#     data = dummydata()
+#     path=data.name
+#     test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
+#     test = SamplingDataset(path, test, -1, ["subdataset", "subfolder"], [2,1])
+#     test = DocPackingDataset(test, 30, 0, -1, -2, 4)
+#     test = ShuffleDataset(test, 10)
+#     l = StatefulDataLoader(test, batch_size=1, num_workers=1)
+#     for i,out in enumerate(l):
+#         if i==480:
+#             break
+#     # return
+#     save_ckpt_custom(l, path)
+#     print(l.state_dict())
+
+#     test2 = ScalableReader(path, 3, 5, ArrowHandler, -1, n_logical_shards=10)
+#     test2 = SamplingDataset(path, test2, -1, ["subdataset", "subfolder"], [2,1])
+#     test2 = DocPackingDataset(test2, 30, 8, -1, -2, 2)
+#     test2 = ShuffleDataset(test2, 4)
+#     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
+#     load_ckpt_custom(l2, path)
+#     out = iter(l2)
+#     print(next(out))
+#     print(next(out))
+#     print(next(out))
+#     print(l2.state_dict())
