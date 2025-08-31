@@ -144,6 +144,7 @@ class _StatefulDataset(data.IterableDataset):
         ):
             out[state_type] = {self.statename(flag): getattr(self, flag) for flag in flags}
         # Deepcopy required to prevent in-place modification from later prefetches
+        out["custom"]["__rescaling__"] = False
         return deepcopy(out)
 
     def load_state_dict(self, state_dict):
@@ -157,11 +158,12 @@ class _StatefulDataset(data.IterableDataset):
         ):
             [setattr(self, flag, state_dict[state_type][self.statename(flag)]) for flag in flags]
         # Apply custom reshard fns to loaded custom values
-        [setattr(
-            self, 
-            self.custom_vars[i], 
-            self.custom_fns[i](getattr(self, self.custom_vars[i]))
-        ) for i in range(len(self.custom_vars))]
+        if state_dict["custom"]["__rescaling__"]:
+            [setattr(
+                self, 
+                self.custom_vars[i], 
+                self.custom_fns[i](getattr(self, self.custom_vars[i]))
+            ) for i in range(len(self.custom_vars))]
 
 
 class _NestedStatefulDataset(_StatefulDataset):
@@ -207,10 +209,15 @@ class _NestedStatefulDataset(_StatefulDataset):
         else:
             for i,subdata in enumerate(self.dataset):
                 prefix = self.statename("", i)
-                subdict = {state_type:{k[len(prefix):]:v} 
-                           for state_type in state_dict 
-                           for k,v in state_dict[state_type].items()
-                           if prefix in k}
+                subdict = {state_type:{k[len(prefix):]:v
+                                       for k,v in state_dict[state_type].items()
+                                       if prefix in k} 
+                           for state_type in state_dict}
+                # for state_type in state_dict:
+                #     for k,v in state_dict[state_type].items():
+                #         if prefix in k:
+                #             print(".   ", k[len(prefix):])
+                # print(prefix, subdict, state_dict)
                 subdata.load_state_dict(subdict)
 
     def state_dict(self):
@@ -404,16 +411,17 @@ class ShuffleDataset(_NestedStatefulDataset):
         # Pad out buffer if needed
         self._pad_buffer()
         first_draw = next(dataset)
-        while True:
-            # If buffer entries have wrong length, reset buffer
-            if len(first_draw) != len(self.buffer[0]):
-                self.buffer = []
-                self.buffer_size = 0
-                self._pad_buffer()
+        # If buffer entries have wrong length, reset buffer
+        if len(first_draw) != len(self.buffer[0]):
+            self.buffer = []
+            self.buffer_size = 0
+            self._pad_buffer()
 
+        while True:
             # If buffer is undersized, add a datapoint
             if self.buffer_size < self.window_size:
-                self.buffer[self.buffer_size] = next(dataset) if self.buffer_size > 0 else first_draw
+                self.buffer[self.buffer_size] = first_draw if first_draw is not None else next(dataset)
+                first_draw = None
                 self.buffer_size += 1
 
             # Swap out randomly sampled value from buffer.
@@ -425,7 +433,8 @@ class ShuffleDataset(_NestedStatefulDataset):
                 self.buffer[i] = self.buffer[self.buffer_size - 1]
                 self.buffer_size -= 1
             else:
-                self.buffer[i] = next(dataset)
+                self.buffer[i] = first_draw if first_draw is not None else next(dataset)
+                first_draw = None
             yield out
 
     def _pad_buffer(self):
@@ -438,7 +447,7 @@ class ShuffleDataset(_NestedStatefulDataset):
         # Create generator if it doesn't already exist
         self.setup()
         # Write generator state manually
-        self.g_state = self.generator.get_state()
+        self.g_state = self.generator.get_state().clone()
         # Prune buffer so it can be resharded in future
         self.buffer = torch.tensor(self.buffer[: self.buffer_size])
         out = super().state_dict()
@@ -851,6 +860,7 @@ class ScalableReader(_StatefulDataset):
         reader = None
         ndocs = -1
         has_yielded = False
+        assert len(self.shard_states) > 0 and self.shard_states[0,0] > -1, f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no logical shards!"
         while True:
             # Isolate undervisited shards
             epoch_count = self.shard_states[:,4].min().item()
@@ -891,8 +901,8 @@ class ScalableReader(_StatefulDataset):
                 self.shard_states[i][1] = 0
                 # Increase epoch count after finishing shard
                 self.shard_states[i][4] += 1
-            # Begin new epoch
-            assert has_yielded, f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents!"
+            # Begin new epoch, and verify that after visiting all shards, some data has been produced
+            assert has_yielded or len(shardset)!=self.shard_states[:,0].sign().relu().sum().item(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
     
     def shard_rescale(self, shard_states: List[torch.Tensor]):
         """
@@ -961,6 +971,7 @@ def save_ckpt_custom(
     Aggregates worker states, and separates out state/broadcast/reshard/custom variables.
     Saves each state dict separately. 
     """
+    os.makedirs(path, exist_ok=True)
     rank = loader.dataset.rank
     state = deepcopy(loader.state_dict())
     dstate = state["_snapshot"]["_worker_snapshots"]
@@ -1046,7 +1057,7 @@ def load_ckpt_custom(
     if easy_load:
         reshard_vars = torch.load(os.path.join(path, f"loader_reshard_{r}.pth"))
         # Flip dict[list] back to list[dict]
-        reshard_vars = [{k:reshard_vars[i][k] for k in reshard_vars} for i in range(nworkers)]
+        reshard_vars = [{k:reshard_vars[k][i] for k in reshard_vars} for i in range(nworkers)]
         dstate["reshard"] = reshard_vars
     else:
         # Load all shards
@@ -1073,9 +1084,13 @@ def load_ckpt_custom(
         dstate["custom"] = custom_vars
     else:
         # Load all shards
-        custom_vars = [torch.load(os.path.join(path, f"loader_custom_{i}.pth")) for i in range(ckp_ws)]  # list[dict[tuple[list]]]
+        custom_vars = [torch.load(os.path.join(path, f"loader_custom_{i}.pth")) for i in range(ckp_ws)]  # list[dict[list]]
+        # Pop __rescaling__ values since they can't be reformatted/compiled like the other, proper values
+        [d.pop("__rescaling__") for d in custom_vars]
         # Flip and fuse list[dict[list]] into dict[list]
         custom_vars = {k:sum([c[k] for c in custom_vars], []) for k in custom_vars[0]}
+        # Set __rescaling__ flag
+        custom_vars["__rescaling__"] = True
         # Expand dict[list] to list[dict[list]] via replication
         dstate["custom"] = [custom_vars] * nworkers
 
