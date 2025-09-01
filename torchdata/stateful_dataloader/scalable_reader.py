@@ -860,12 +860,14 @@ class ScalableReader(_StatefulDataset):
         reader = None
         ndocs = -1
         has_yielded = False
-        assert len(self.shard_states) > 0 and self.shard_states[0,0] > -1, f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no logical shards!"
+        assert len(self.shard_states) > 0 and self.shard_states[:,0].sign().add(1).sign().sum() > 0, f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no logical shards!"
         while True:
             # Isolate undervisited shards
             epoch_count = self.shard_states[:,4].min().item()
             shardset = self.shard_states[:,4].eq(epoch_count).nonzero().squeeze(-1)
-            for i in shardset:
+            for j,k in enumerate(shardset):
+                # Account for shard_state reordering occuring at end of each loop iter
+                i = k-j
                 shardid = self.shard_states[i][0].item()
                 files = self._get_shard_breakdown(shardid, self.n_logical_shards)  # list([docid, start%, end%])
                 file_offset = self.shard_states[i][1].item()
@@ -901,6 +903,14 @@ class ScalableReader(_StatefulDataset):
                 self.shard_states[i][1] = 0
                 # Increase epoch count after finishing shard
                 self.shard_states[i][4] += 1
+                # Prioritize unseen data after rescaling by shifting completed shard to end of shard_states
+                # i.e. shards with (id, epoch_count) [(0,0),(1,1),(2,1),(3,2)] wll produce order:
+                # 0,1,2,0,3,1,2,0,... instead of 0,0,1,2,0,1,2,3,...
+                self.shard_states = torch.cat([
+                    self.shard_states[:i],
+                    self.shard_states[i+1:],
+                    self.shard_states[i:i+1],
+                ], dim=0)
             # Begin new epoch, and verify that after visiting all shards, some data has been produced
             assert has_yielded or len(shardset)!=self.shard_states[:,0].sign().relu().sum().item(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
     
@@ -911,8 +921,10 @@ class ScalableReader(_StatefulDataset):
         if len(shard_states) == self.worldsize:
             return shard_states[self.rank]
         else:
-            # Sort shards by epoch count
+            # Sort shards by epoch count, then id
             shard_states = torch.cat(shard_states, dim=0)
+            _, indices = torch.sort(shard_states[:,0])
+            shard_states = shard_states[indices]
             sorted, indices = torch.sort(shard_states[:,4], descending=True, stable=True)
             shard_states = shard_states[indices]
             # Strip out dummy padding shards
