@@ -27,6 +27,7 @@ parser.add_argument("--seq_len", type=int, default=32, help="Batch seq len")
 parser.add_argument("--num_workers", type=int, default=1, help="Number of dataloader workers per device")
 parser.add_argument("--b_size", type=int, default=2, help="Number of data points per step per device")
 parser.add_argument("--n_steps", type=int, default=30, help="Number of steps to take before saving. (n_steps * b_size * worldsize) cannot exceed number of items in epoch (3000)")
+parser.add_argument("--n_bins", type=int, default=4, help="Number of packing/slicing bins")
 parser.add_argument("--seed", type=int, default=42)
 
 args = parser.parse_args()
@@ -69,7 +70,7 @@ if not os.path.exists(datapath):
 # Build dataloader
 data = ScalableReader(datapath, rank, world_size, ArrowHandler, -1, seed=args.seed, max_chunksize=40, n_logical_shards=args.logical_shards)
 # Packing and slicing
-data = DocPackingDataset(data, args.seq_len, 4, -1, -2, 4)
+data = DocPackingDataset(data, args.seq_len, 4, -1, -2, args.n_bins)
 # Statelessly convert all outputs to tensors
 data = PreprocessDataset(data, torch.tensor)
 # Wrap in StatefulDataLoader
