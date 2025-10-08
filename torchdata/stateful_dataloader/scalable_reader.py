@@ -5,15 +5,15 @@ import pyarrow as pa
 import tempfile
 from abc import ABCMeta, abstractmethod
 from copy import deepcopy
-from typing import Any, Callable, List, Optional, Set, Tuple
+from typing import Any, Callable, List, Optional, Set
 
 import torch
-# from torch.distributed import checkpoint
+from torch.distributed import checkpoint
 # from torch.distributed.checkpoint.state_dict_loader import _load_state_dict_from_keys
-# import torch.distributed.tensor as dtensor
-# import torch.distributed as dist
+import torch.distributed.tensor as dtensor
+import torch.distributed as dist
 import torch.utils.data as data
-from torch.utils.data import DataLoader
+from torch.distributed.tensor._shards_wrapper import LocalShardsWrapper
 
 from .stateful_dataloader import StatefulDataLoader
 
@@ -972,6 +972,113 @@ class ScalableReader(_StatefulDataset):
 
 
 #### -------------------------    CHECKPOINT FUNCTIONS    ------------------------- ####
+
+
+def save_ckpt_dcp(
+    loader: StatefulDataLoader,
+    path: str,
+    device_mesh: dist.DeviceMesh,
+):
+    """
+    Retrieves dataloader state dict, and separates worker states from loader state.
+    Aggregates worker states, and wraps/processes state/broadcast/reshard/custom variables.
+    Saves states concurrently through DCP APIs. 
+    """
+    os.makedirs(path, exist_ok=True)
+    rank = loader.dataset.rank
+    worldsize = loader.dataset.worldsize
+    state = deepcopy(loader.state_dict())
+    nworkers = state["_snapshot"]["_main_snapshot"]["_num_workers"]
+    dstate = state["_snapshot"]["_worker_snapshots"]
+    dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]  # List[dict]
+    # Flip List[dict[dict]] to dict[List[dict]]
+    dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}
+
+    def wrap(d, f):
+        for k,v in d.items():
+            if isinstance(v, dict):
+                d[k] = wrap(v)
+            else:
+                d[k] = f(v)
+        return d
+    
+    def wrap_dtensor(x, mesh, placement):
+        if x is None:
+            x = float("inf")
+        x = torch.tensor(x)[None]
+        return dtensor.DTensor.from_local(x, mesh, [placement])
+
+    # State dict: add loader state, wrap in DTensor (no special wrapper)
+    # We don't care about rescaling behavior here because it'll get dropped in that case
+    state_vars = dstate["state"]
+    # Flip List[dict] to dict[List]
+    state_vars = {k:[d[k] for d in state_vars] for k in state_vars[0].keys()}
+    state_vars["loader_state"] = state
+    state_vars = wrap(state_vars, lambda x: wrap_dtensor(x, device_mesh, dtensor.placement_types.Shard(0)))
+    dstate["state"] = state_vars
+
+    if rank==0:
+        print("State complete")
+
+    # Broadcast dict: save only first entry, only if rank is 0
+    broadcast_vars = dstate.pop("broadcast")[0]
+    if rank == 0:
+        dstate["broadcast"] = broadcast_vars
+
+    if rank==0:
+        print("Broadcast complete")
+
+    # Reshard dict: concatenate entries, fetch global size, and wrap in sharding DTensor
+    reshard_vars = dstate["reshard"]
+    # Assert all reshard vals are tensors
+    for k,v in reshard_vars[0].items():
+        assert isinstance(v, torch.Tensor), f"Reshard var {k} is not a torch tensor!"
+    # Flip list[dict] to dict[list] and concat
+    reshard_vars = {k:torch.cat([d[k] for d in reshard_vars], dim=0) for k in reshard_vars[0].keys()}
+    # Wrap in DTensor, fetching global sizes
+    def wrap_shardtensor(x, mesh):
+        size = torch.tensor(x.size(0))
+        sizes = torch.empty(worldsize)
+        sizes = dist.all_gather_into_tensor(sizes, size)
+        offsets = sizes.cumsum(0) - sizes[0]
+        global_shape = [sizes.sum()] + x.shape[1:]
+        x = LocalShardsWrapper(
+            local_shards=[x], local_offsets=[(offsets[rank], 0)]
+        )
+        x = dtensor.DTensor.from_local(
+            local_tensor=x,
+            device_mesh=mesh,
+            placements=[dtensor.placement_types.Shard(0)],
+            shape=torch.Size(global_shape),
+            stride=torch.Size([1]*len(global_shape)),
+        )
+        return x
+    reshard_vars = wrap(reshard_vars, lambda x: wrap_shardtensor(x, device_mesh))
+    dstate["reshard"] = reshard_vars
+
+    if rank==0:
+        print("Reshard complete")
+
+    # Custom: prepend rank to every key
+    custom_vars = dstate["custom"]
+    # Convert list[dict] to dict with prepended rank in keys
+    custom_vars = {f"rank{rank*nworkers+i}."+k : custom_vars[i][k] for i in range(len(custom_vars)) for k in custom_vars[0].keys()}
+    dstate["custom"] = custom_vars
+
+    if rank==0:
+        print("Custom complete")
+
+    checkpoint.save(
+        dstate,
+        storage_writer=checkpoint.FileSystemWriter(path=path), 
+        planner = checkpoint.DefaultSavePlanner(),
+    )
+
+    if rank==0:
+        print("Global save complete")
+
+    # TODO: TOP-LEVEL 4 KEY CONFLICTS???
+
 
 
 def save_ckpt_custom(
