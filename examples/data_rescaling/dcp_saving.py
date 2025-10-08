@@ -90,7 +90,7 @@ if not os.path.exists(ckpt_path) or len(os.listdir(ckpt_path)) == 0:
         else:
             time.sleep(.1)
         print(f"Rank {rank} of {world_size}:", inp)
-        dist.sync()
+        dist.barrier()
         if i == args.n_steps-1:
             if rank == 0:
                 print("Iteration complete!")
