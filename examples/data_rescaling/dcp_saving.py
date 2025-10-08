@@ -86,6 +86,9 @@ if not os.path.exists(ckpt_path) or len(os.listdir(ckpt_path)) == 0:
 
     for i, inp in enumerate(data):
         print(f"Rank {rank} of {world_size}:", inp)
+        if rank==0:
+            print()
+        time.sleep(.1)
         if i == args.n_steps-1:
             if rank == 0:
                 print("Iteration complete!")
