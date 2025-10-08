@@ -1038,8 +1038,8 @@ def save_ckpt_dcp(
     # Wrap in DTensor, fetching global sizes
     def wrap_shardtensor(x, mesh):
         size = torch.tensor(x.size(0), dtype=torch.long)
-        sizes = torch.empty(worldsize, dtype=torch.long)
-        sizes = dist.all_gather_into_tensor(sizes, size)
+        sizes = torch.empty(worldsize, 1, dtype=torch.long)
+        sizes = dist.all_gather_into_tensor(sizes, size).squeeze(1)
         offsets = sizes.cumsum(0) - sizes[0]
         global_shape = [sizes.sum()] + x.shape[1:]
         x = LocalShardsWrapper(
