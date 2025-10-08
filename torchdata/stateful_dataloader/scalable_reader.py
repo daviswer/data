@@ -997,7 +997,7 @@ def save_ckpt_dcp(
     def wrap(d, f):
         for k,v in d.items():
             if isinstance(v, dict):
-                d[k] = wrap(v)
+                d[k] = wrap(v, f)
             else:
                 d[k] = f(v)
         return d
