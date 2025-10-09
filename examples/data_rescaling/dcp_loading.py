@@ -90,7 +90,7 @@ else:
     dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}
     # Flip dict[List[dict]] to [dict[dict[List]]]
     for k in dstate:
-        dstate[k] = {k2:[d[k2] for d in dstate[k]] for k2 in dstate[k]}
+        dstate[k] = {k2:[d[k2] for d in dstate[k]] for k2 in dstate[k][0]}
     dist.checkpoint.load(
         dstate,
         storage_reader=dist.checkpoint.FileSystemReader(path=ckpt_path)
