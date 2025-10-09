@@ -91,9 +91,14 @@ else:
     # Flip dict[List[dict]] to [dict[dict[List]]]
     for k in dstate:
         dstate[k] = {k2:[d[k2] for d in dstate[k]] for k2 in dstate[k][0]}
+    
+    time.sleep(rank)
+    print(dstate)
+
     dist.checkpoint.load(
         dstate,
         storage_reader=dist.checkpoint.FileSystemReader(path=ckpt_path)
     )
+    print()
     time.sleep(rank)
-    print(d)
+    print(dstate)
