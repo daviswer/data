@@ -1024,6 +1024,8 @@ def save_ckpt_dcp(
     broadcast_vars = dstate.pop("broadcast")[0]
     if rank == 0:
         dstate["broadcast"] = broadcast_vars
+        # Add ckpt worldsize
+        dstate["broadcast"]["global_worldsize"] = worldsize * nworkers
 
     if rank==0:
         print("Broadcast complete")
@@ -1076,9 +1078,6 @@ def save_ckpt_dcp(
 
     if rank==0:
         print("Global save complete")
-
-    # TODO: TOP-LEVEL 4 KEY CONFLICTS???
-
 
 
 def save_ckpt_custom(
@@ -1135,6 +1134,67 @@ def save_ckpt_custom(
         custom_vars,
         os.path.join(path, f"loader_custom_{rank}.pth"),
     )
+
+
+def load_ckpt_dcp(
+    loader: StatefulDataLoader,
+    path: str,
+    device_mesh: dist.DeviceMesh,
+):
+    """
+    Retrieves dataloader state dict, and separates worker states from loader state.
+    Handle loading/rescaling for the 4 tags (and loader state), using DCP.
+    """
+    base = loader.state_dict()
+    nworkers = base["_snapshot"]["_main_snapshot"]["_num_workers"]
+    r = loader.dataset.rank
+    w = loader.dataset.worldsize
+    dstate = base["_snapshot"]["_worker_snapshots"]
+    dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]  # List[dict]
+    # Flip List[dict[dict]] to dict[List[dict]]
+    dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}    inp = {"state":deepcopy(base), "dstate":dstate}
+    
+    ckp_ws = 0 if not os.path.exists(path) else len([x for x in os.listdir(path) if "loader_state_" in x])
+    d = {'broadcast':{'global_worldsize':0}}
+    d = checkpoint.load(
+        state_dict = d,
+        storage_reader = checkpoint.FileSystemReader(path=path),
+    )
+    easy_load = ckp_ws == w and d['broadcast']['global_worldsize'] == w * nworkers
+
+    def unwrap(d, f):
+        for k,v in d.items():
+            if isinstance(v, dict):
+                d[k] = unwrap(v, f)
+            else:
+                d[k] = f(v)
+        return d
+    
+    def unwrap_dtensor(x):
+        x = x.to_local().tolist()[0]
+        if x == float("inf"):
+            x = None
+        return x
+    
+    meta = checkpoint.list_stored_state_dict(checkpoint_id=path)
+
+    def flesh(d, m):
+        for k,v in m.items():
+            if isinstance(v, dict):
+                d[k] = flesh(v, m[k])
+            else:
+                d[k] = torch.empty(v.size, dtype=v.properties.dtype)  # TODO: should this be dtensor?
+        return d
+    
+    # # State: load if easy, otherwise ignore
+    # if easy_load:
+    #     state_vars = flesh({}, meta['state'])
+    #     state_vars = checkpoint.load(
+    #         state_dict = state_vars,
+    #         storage_reader = checkpoint.FileSystemReader(path=path),
+    #     )
+    #     base = 
+
 
 
 def load_ckpt_custom(

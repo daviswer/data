@@ -99,5 +99,8 @@ if not os.path.exists(ckpt_path) or len(os.listdir(ckpt_path)) == 0:
     print(
         "Generation complete! Please rerun (with different world size / workers if desired) to complete the check."
     )
+    time.sleep(rank)
+    print(data.state_dict())
 elif rank==0:
     print(f"Error: checkpoint {ckpt_path} already exists!")
+time.sleep(10)
