@@ -88,9 +88,9 @@ else:
     dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]  # List[dict]
     # Flip List[dict[dict]] to dict[List[dict]]
     dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}
-    # Flip dict[List[dict]] to [dict[dict[List]]]
+    # Flip dict[List[dict]] to [dict[dict[List]]] and truncate
     for k in dstate:
-        dstate[k] = {k2:[d[k2] for d in dstate[k]] for k2 in dstate[k][0]}
+        dstate[k] = {k2:[d[k2] for d in dstate[k]][0] for k2 in dstate[k][0]}
     # Pop custom subdict
     dstate.pop('custom')
 
