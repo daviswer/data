@@ -98,6 +98,7 @@ else:
     # print(dstate)
 
     dstate = {'broadcast':{'global_worldsize':0}}
+    dstate['state'] = {'loader_state':{'snapshot':{'_snapshot_step':0}}}
 
     dist.checkpoint.load(
         dstate,
