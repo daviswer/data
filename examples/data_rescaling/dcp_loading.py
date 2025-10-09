@@ -91,7 +91,9 @@ else:
     # Flip dict[List[dict]] to [dict[dict[List]]]
     for k in dstate:
         dstate[k] = {k2:[d[k2] for d in dstate[k]] for k2 in dstate[k][0]}
-    
+    # Pop custom subdict
+    dstate.pop('custom')
+
     time.sleep(rank)
     print(dstate)
 
