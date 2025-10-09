@@ -5,6 +5,7 @@ import pyarrow as pa
 import time
 import torch
 from torch import distributed as dist
+from copy import deepcopy
 
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchdata.stateful_dataloader.scalable_reader import (
@@ -82,9 +83,16 @@ if not os.path.exists(ckpt_path) or len(os.listdir(ckpt_path)) == 0:
     if rank==0:
         print(f"Error: checkpoint {ckpt_path} does not exist!")
 else:
-    d = data.state_dict()
+    state = deepcopy(data.state_dict())
+    dstate = state["_snapshot"]["_worker_snapshots"]
+    dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]  # List[dict]
+    # Flip List[dict[dict]] to dict[List[dict]]
+    dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}
+    # Flip dict[List[dict]] to [dict[dict[List]]]
+    for k in dstate:
+        dstate[k] = {k2:[d[k2] for d in dstate[k]] for k2 in dstate[k]}
     dist.checkpoint.load(
-        d,
+        dstate,
         storage_reader=dist.checkpoint.FileSystemReader(path=ckpt_path)
     )
     time.sleep(rank)
