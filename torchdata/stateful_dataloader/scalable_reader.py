@@ -1031,7 +1031,7 @@ def save_ckpt_dcp(
     # Flip list[dict] to dict[list]
     reshard_vars = {k:[d[k] for d in reshard_vars] for k in reshard_vars[0].keys()}
     # Inject sizes into dstate["state"] for use when not rescaling
-    dstate["state"]["reshard_sizes"] = {
+    state_vars["reshard_sizes"] = {
         k:[x.size(0) for x in v]
         for k,v in reshard_vars.items()
     }
