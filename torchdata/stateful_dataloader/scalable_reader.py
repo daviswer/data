@@ -1285,7 +1285,7 @@ def load_ckpt_dcp(
         # Convert local_split size info from DTensor back to list
         local_split = {
             k: v.to_local().tolist()
-            for k,v in reshard_sizes
+            for k,v in reshard_sizes.items()
         }
     else:
         reshard_vars = {}
