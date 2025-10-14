@@ -1204,8 +1204,14 @@ def load_ckpt_dcp(
         print(meta['broadcast'])
         print(meta['reshard'])
         print(meta['custom'])
-        print(meta['state'])
         print()
+    # Unflatten reshard sizes
+    loaderflags = [k[k.find('.')+1:] for k in meta["state"] if "reshard_sizes" in k[:k.find('.')]]
+    meta["state"]["reshard_sizes"] = {k:meta["state"].pop("reshard_sizes."+k) for k in loaderflags}
+
+    if r==0:
+        print(meta["state"]["reshard_sizes"])
+
     # Unflatten loader state fully
     loaderflags = [k[k.find('.')+1:] for k in meta["state"] if "loader_state" in k[:k.find('.')]]
     loadermeta = {}
@@ -1218,6 +1224,10 @@ def load_ckpt_dcp(
             else:
                 d[subk] = {}
         d[trace[-1]] = meta["state"].pop("loader_state."+key)
+
+    if r==0:
+        print(meta["state"]["loader_state"])
+
     meta["state"]["loader_state"] = loadermeta
     
     if r==0:
