@@ -1165,7 +1165,7 @@ def load_ckpt_dcp(
     # Flip List[dict[dict]] to dict[List[dict]]
     dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}    inp = {"state":deepcopy(base), "dstate":dstate}
     
-    ckp_ws = 0 if not os.path.exists(path) else len([x for x in os.listdir(path) if "loader_state_" in x])
+    ckp_ws = 0 if not os.path.exists(path) else len([x for x in os.listdir(path) if ".distcp" in x])
     d = {'broadcast':{'global_worldsize':0}}
     checkpoint.load(
         state_dict = d,
