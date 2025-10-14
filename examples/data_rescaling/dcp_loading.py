@@ -13,7 +13,7 @@ from torchdata.stateful_dataloader.scalable_reader import (
     PreprocessDataset,
     DocPackingDataset,
     ScalableReader,
-    save_ckpt_dcp,
+    load_ckpt_dcp,
 )
 
 parser = argparse.ArgumentParser(description="Script to validate rescaling of dataloader checkpoints")
@@ -97,13 +97,16 @@ else:
     # time.sleep(rank)
     # print(dstate)
 
-    dstate = {'broadcast':{'global_worldsize':0}}
-    dstate['state'] = {'loader_state':{'_snapshot':{'_snapshot_step':0}}}
+    # dstate = {'broadcast':{'global_worldsize':0}}
+    # dstate['state'] = {'loader_state':{'_snapshot':{'_snapshot_step':0}}}
 
-    dist.checkpoint.load(
-        dstate,
-        storage_reader=dist.checkpoint.FileSystemReader(path=ckpt_path)
-    )
+    # dist.checkpoint.load(
+    #     dstate,
+    #     storage_reader=dist.checkpoint.FileSystemReader(path=ckpt_path)
+    # )
+
+    load_ckpt_dcp(data, ckpt_path, mesh)
+
     print()
     time.sleep(rank)
-    print(dstate)
+    print(data.state_dict())

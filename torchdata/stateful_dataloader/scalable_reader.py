@@ -6,7 +6,7 @@ import pyarrow as pa
 import tempfile
 from abc import ABCMeta, abstractmethod
 from copy import deepcopy
-from typing import Any, Callable, List, Optional, Set
+from typing import Any, cast, Callable, List, Optional, Set, Union
 
 import torch
 from torch.distributed import checkpoint
@@ -15,6 +15,9 @@ import torch.distributed.tensor as dtensor
 import torch.distributed as dist
 import torch.utils.data as data
 from torch.distributed.tensor._shards_wrapper import LocalShardsWrapper
+from torch.distributed.checkpoint._storage_utils import _storage_setup
+from torch.distributed.checkpoint.storage import StorageReader
+
 
 from .stateful_dataloader import StatefulDataLoader
 
@@ -1177,7 +1180,23 @@ def load_ckpt_dcp(
             x = None
         return x
     
-    meta_flat = checkpoint.list_stored_state_dict(checkpoint_id=path)
+    def list_stored_state_dict(
+        checkpoint_id: Union[str, os.PathLike, None] = None,
+        storage_reader: Optional[StorageReader] = None,
+    ):
+        """
+        Copied from https://github.com/pytorch/pytorch/pull/160610
+        List the stored checkpoint metadata.
+        NB: The returned state-dict keys are flattened.
+        """
+        storage_reader = cast(
+            StorageReader, _storage_setup(storage_reader, checkpoint_id, reader=True)
+        )
+        md = storage_reader.read_metadata()
+        sd = md.state_dict_metadata  # flattened dict.
+        return sd
+    
+    meta_flat = list_stored_state_dict(checkpoint_id=path)
     # Unflatten dict one level
     meta = {field:{k[:len(field)+1]:v for k,v in meta_flat.items() if field in k[:k.find('.')]} 
             for field in ["state","broadcast","reshard","custom"]}
@@ -1336,9 +1355,16 @@ def load_ckpt_dcp(
     if r==0:
         print("Custom loaded")
 
-    # TODO: insert dstate back into base
+    # Flip dict[list[dict]] into list[dict[dict]]
+    dstate = [{k:dstate[k][i] for k in dstate} for i in range(nworkers)]
+    # Load worker dstates back into loader
+    for i in range(nworkers):
+        base["_snapshot"]["_worker_snapshots"][f"worker_{i}"]["dataset_state"] = dstate[i]
+    loader.load_state_dict(base)
+
+    if r==0:
+        print("Loading complete!")
         
-# TODO: pull in metadata listing code and straighten out all the freehand code above
 
 """
 TODO: rescaling tests
