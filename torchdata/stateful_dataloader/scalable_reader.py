@@ -1318,7 +1318,7 @@ def load_ckpt_dcp(
     # Convert from dtensor back to List[tensor]
     reshard_vars = {
         k: v.to_local().split(local_split[k])
-        for k,v in reshard_vars
+        for k,v in reshard_vars.items()
     }
     # Flip dict[List] to List[dict]
     dstate["reshard"] = [{k:v[i] for k,v in reshard_vars} for i in range(nworkers)]
