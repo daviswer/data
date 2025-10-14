@@ -1313,7 +1313,7 @@ def load_ckpt_dcp(
     )
     # Convert from dtensor back to List[tensor]
     reshard_vars = {
-        k: v.to_local().split(local_split[k])
+        k: v.to_local().local_shards()[0].split(local_split[k])
         for k,v in reshard_vars.items()
     }
     # Flip dict[List] to List[dict]
