@@ -1205,13 +1205,9 @@ def load_ckpt_dcp(
     meta["state"]["reshard_sizes"] = {k:meta["state"].pop("reshard_sizes."+k) for k in loaderflags}
     # Unflatten loader state fully
     loaderflags = [k[k.find('.')+1:] for k in meta["state"] if "loader_state" in k[:k.find('.')]]
-    if r==0:
-        print(loaderflags)
     loadermeta = {}
     for key in loaderflags:
         trace = key.split('.')
-        if r==0:
-            print(trace)
         d = loadermeta
         for subk in trace[:-1]:
             if subk not in d:
@@ -1219,9 +1215,6 @@ def load_ckpt_dcp(
             d = d[subk]
         d[trace[-1]] = meta["state"].pop("loader_state."+key)
     meta["state"]["loader_state"] = loadermeta
-
-    if r==0:
-        print(meta["state"]["loader_state"])
 
     def crawl(d, m, f):
     # Crawl nested dict d using metadata m, applying function f to every non-dict entry.
@@ -1289,9 +1282,14 @@ def load_ckpt_dcp(
                 stride = [1] * len(v.size),
             ) for k,v in meta['reshard'].items()
         }
-        local_split = reshard_sizes[k]
+        # Convert local_split size info from DTensor back to list
+        local_split = {
+            k: v.to_local().tolist()
+            for k,v in reshard_sizes
+        }
     else:
         reshard_vars = {}
+        local_split = {}
         # Use global size to construct resharded LocalShardsWrappers
         for k,v in meta["reshard"].items():
             offsets = [(i*v.size[0])//w for i in range(w)] + [v.size[0]]
@@ -1311,15 +1309,15 @@ def load_ckpt_dcp(
                 shape = v.size,
                 stride = [1] * len(v.size),
             )
-        local_split = [(i*my_size)//nworkers for i in range(nworkers)] + [my_size]
-        local_split = [local_split[i+1]-local_split[i] for i in range(nworkers)]
+            local_split[k] = [(i*my_size)//nworkers for i in range(nworkers)] + [my_size]
+            local_split[k] = [local_split[k][i+1]-local_split[k][i] for i in range(nworkers)]
     checkpoint.load(
         state_dict=reshard_vars,
         storage_reader=checkpoint.FileSystemReader(path=path),
     )
     # Convert from dtensor back to List[tensor]
     reshard_vars = {
-        k: v.to_local().split(local_split)
+        k: v.to_local().split(local_split[k])
         for k,v in reshard_vars
     }
     # Flip dict[List] to List[dict]
