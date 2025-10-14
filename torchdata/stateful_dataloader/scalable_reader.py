@@ -1317,7 +1317,7 @@ def load_ckpt_dcp(
         for k,v in reshard_vars.items()
     }
     # Flip dict[List] to List[dict]
-    dstate["reshard"] = [{k:v[i] for k,v in reshard_vars} for i in range(nworkers)]
+    dstate["reshard"] = [{k:v[i] for k,v in reshard_vars.items()} for i in range(nworkers)]
 
     if r==0:
         print("Reshard loaded")
