@@ -1308,7 +1308,7 @@ def load_ckpt_dcp(
             local_split[k] = [(i*my_size)//nworkers for i in range(nworkers)] + [my_size]
             local_split[k] = [local_split[k][i+1]-local_split[k][i] for i in range(nworkers)]
     checkpoint.load(
-        state_dict=reshard_vars,
+        state_dict={"reshard": reshard_vars},
         storage_reader=checkpoint.FileSystemReader(path=path),
     )
     # Convert from dtensor back to List[tensor]
@@ -1328,7 +1328,7 @@ def load_ckpt_dcp(
         prefix = f"rank{r}"
         custom_vars = {k:None for k in meta["custom"] if k[:len(prefix)] == prefix}
         checkpoint.load(
-            state_dict=custom_vars,
+            state_dict={"custom": custom_vars},
             storage_reader=checkpoint.FileSystemReader(path=path),
         )
         # Flip dict[list] into list[dict]
@@ -1338,7 +1338,7 @@ def load_ckpt_dcp(
         # Load keys across ranks, compile each rankset into list. Pop and reset __rescaling__ flag
         custom_vars = {k:None for k in meta["custom"]}
         checkpoint.load(
-            state_dict=custom_vars,
+            state_dict={"custom": custom_vars},
             storage_reader=checkpoint.FileSystemReader(path=path),
         )
         # Convert dict[List] to List[dict[List]] by pulling out rank prefixes
