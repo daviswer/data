@@ -1198,7 +1198,7 @@ def load_ckpt_dcp(
     
     meta_flat = list_stored_state_dict(checkpoint_id=path)
     # Unflatten dict one level
-    meta = {field:{k[:len(field)+1]:v for k,v in meta_flat.items() if field in k[:k.find('.')]} 
+    meta = {field:{k[len(field)+1:]:v for k,v in meta_flat.items() if field in k[:k.find('.')]} 
             for field in ["state","broadcast","reshard","custom"]}
     # Unflatten loader state fully
     loaderflags = [k[k.find('.')+1:] for k in meta["state"] if "loader_state" in k[:k.find('.')]]
