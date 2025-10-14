@@ -1224,14 +1224,10 @@ def load_ckpt_dcp(
             else:
                 d[subk] = {}
         d[trace[-1]] = meta["state"].pop("loader_state."+key)
+    meta["state"]["loader_state"] = loadermeta
 
     if r==0:
         print(meta["state"]["loader_state"])
-
-    meta["state"]["loader_state"] = loadermeta
-    
-    if r==0:
-        print(meta)
 
     def crawl(d, m, f):
     # Crawl nested dict d using metadata m, applying function f to every non-dict entry.
