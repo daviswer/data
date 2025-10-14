@@ -1167,7 +1167,7 @@ def load_ckpt_dcp(
     
     ckp_ws = 0 if not os.path.exists(path) else len([x for x in os.listdir(path) if "loader_state_" in x])
     d = {'broadcast':{'global_worldsize':0}}
-    d = checkpoint.load(
+    checkpoint.load(
         state_dict = d,
         storage_reader = checkpoint.FileSystemReader(path=path),
     )
@@ -1233,7 +1233,7 @@ def load_ckpt_dcp(
     if easy_load:
         # Flesh with dtensors, load straightforwardly
         state_vars = crawl({}, meta['state'], functools.partial(build_dtensor, rank=r, mesh=device_mesh))
-        state_vars = checkpoint.load(
+        checkpoint.load(
             state_dict = {"state":state_vars},
             storage_reader = checkpoint.FileSystemReader(path=path),
         )
@@ -1252,10 +1252,10 @@ def load_ckpt_dcp(
     # Broadcast: load subset, pop global worldsize
     broadcast_vars = {k:None for k in meta['broadcast']}  # Assuming flat dict
     # broadcast_vars = crawl({}, meta['broadcast'], lambda x,m: None)
-    broadcast_vars = checkpoint.load(
-            state_dict = {"broadcast":broadcast_vars},
-            storage_reader = checkpoint.FileSystemReader(path=path),
-        )
+    checkpoint.load(
+        state_dict = {"broadcast":broadcast_vars},
+        storage_reader = checkpoint.FileSystemReader(path=path),
+    )
     dstate["broadcast"] = [broadcast_vars] * nworkers
 
     if r==0:
@@ -1304,7 +1304,7 @@ def load_ckpt_dcp(
             )
         local_split = [(i*my_size)//nworkers for i in range(nworkers)] + [my_size]
         local_split = [local_split[i+1]-local_split[i] for i in range(nworkers)]
-    reshard_vars = checkpoint.load(
+    checkpoint.load(
         state_dict=reshard_vars,
         storage_reader=checkpoint.FileSystemReader(path=path),
     )
@@ -1324,7 +1324,7 @@ def load_ckpt_dcp(
         # Load only the current rank's key
         prefix = f"rank{r}"
         custom_vars = {k:None for k in meta["custom"] if k[:len(prefix)] == prefix}
-        custom_vars = checkpoint.load(
+        checkpoint.load(
             state_dict=custom_vars,
             storage_reader=checkpoint.FileSystemReader(path=path),
         )
@@ -1334,7 +1334,7 @@ def load_ckpt_dcp(
     else:
         # Load keys across ranks, compile each rankset into list. Pop and reset __rescaling__ flag
         custom_vars = {k:None for k in meta["custom"]}
-        custom_vars = checkpoint.load(
+        checkpoint.load(
             state_dict=custom_vars,
             storage_reader=checkpoint.FileSystemReader(path=path),
         )
