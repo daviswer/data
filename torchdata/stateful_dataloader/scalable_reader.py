@@ -1214,10 +1214,9 @@ def load_ckpt_dcp(
             print(trace)
         d = loadermeta
         for subk in trace[:-1]:
-            if subk in d:
-                d = d[subk]
-            else:
+            if subk not in d:
                 d[subk] = {}
+            d = d[subk]
         d[trace[-1]] = meta["state"].pop("loader_state."+key)
     meta["state"]["loader_state"] = loadermeta
 
