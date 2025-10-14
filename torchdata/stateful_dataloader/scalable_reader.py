@@ -1282,11 +1282,7 @@ def load_ckpt_dcp(
                 stride = [1] * len(v.size),
             ) for k,v in meta['reshard'].items()
         }
-        # Convert local_split size info from DTensor back to list
-        local_split = {
-            k: v.to_local().tolist()
-            for k,v in reshard_sizes.items()
-        }
+        local_split = reshard_sizes
     else:
         reshard_vars = {}
         local_split = {}
