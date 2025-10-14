@@ -1200,6 +1200,12 @@ def load_ckpt_dcp(
     # Unflatten dict one level
     meta = {field:{k[len(field)+1:]:v for k,v in meta_flat.items() if field in k[:k.find('.')]} 
             for field in ["state","broadcast","reshard","custom"]}
+    if r==0:
+        print(meta['broadcast'])
+        print(meta['reshard'])
+        print(meta['custom'])
+        print(meta['state'])
+        print()
     # Unflatten loader state fully
     loaderflags = [k[k.find('.')+1:] for k in meta["state"] if "loader_state" in k[:k.find('.')]]
     loadermeta = {}
