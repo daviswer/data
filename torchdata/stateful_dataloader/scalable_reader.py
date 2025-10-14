@@ -1321,6 +1321,7 @@ def load_ckpt_dcp(
 
     if r==0:
         print("Reshard loaded")
+        print(meta["custom"])
 
     # Custom: key based handling
     if easy_load:
