@@ -1386,12 +1386,15 @@ TODO: rescaling tests
 
 2,3:
 2,3 DONE
-1,4 
-2,4
+1,4 DONE
+2,4 DONE
 
 1,2:
-1,1
-3,1
+1,1 DONE
+3,1 DONE
+
+2,3 more complex:
+1,4 
 """
 
 # TODO: shift custom fns into testing file

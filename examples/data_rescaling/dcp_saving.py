@@ -11,7 +11,9 @@ from torchdata.stateful_dataloader.scalable_reader import (
     ArrowHandler,
     PreprocessDataset,
     DocPackingDataset,
+    SamplingDataset,
     ScalableReader,
+    ShuffleDataset,
     save_ckpt_dcp,
 )
 
@@ -50,8 +52,9 @@ if not os.path.exists(datapath):
     if rank == 0:
         os.makedirs(datapath)
         schema = pa.schema([pa.field("tokens", pa.uint32())])
+        os.makedirs(os.path.join(datapath, "subdata"))
         with pa.ipc.new_file(
-            os.path.join(datapath, "fileshard_1.arrow"), schema
+            os.path.join(datapath, "subdata/fileshard_1.arrow"), schema
         ) as writer:
             for i in range(500):
                 out = list(range(i * 100, i * 100 + 100))
@@ -69,8 +72,12 @@ if not os.path.exists(datapath):
 
 # Build dataloader
 data = ScalableReader(datapath, rank, world_size, ArrowHandler, -1, seed=args.seed, max_chunksize=40, n_logical_shards=args.logical_shards)
+# Subdata sampling
+data = SamplingDataset(datapath, data, -1, ["subdata","subfolder"], [2,1])
 # Packing and slicing
 data = DocPackingDataset(data, args.seq_len, 4, -1, -2, args.n_bins)
+# Shuffling
+data = ShuffleDataset(data, window_size=10)
 # Statelessly convert all outputs to tensors
 data = PreprocessDataset(data, torch.tensor)
 # Wrap in StatefulDataLoader

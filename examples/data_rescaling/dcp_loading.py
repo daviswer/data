@@ -12,7 +12,9 @@ from torchdata.stateful_dataloader.scalable_reader import (
     ArrowHandler,
     PreprocessDataset,
     DocPackingDataset,
+    SamplingDataset,
     ScalableReader,
+    ShuffleDataset,
     load_ckpt_dcp,
 )
 
@@ -45,33 +47,18 @@ assert args.logical_shards >= world_size*args.num_workers, f"Logical shards {arg
 assert args.logical_shards <= 1000, f"Logical shards {args.logical_shards} cannot exceed number of documents 1000"
 assert args.n_steps*args.b_size*world_size < 3000, f"Number of items drawn before saving {args.n_steps*args.b_size*world_size} cannot exceed number of document chunks 3000."
 
-# Build dataset
+# Access dataset
 datapath = os.path.join(args.ckpt_path, "dataset")
-if not os.path.exists(datapath):
-    if rank == 0:
-        os.makedirs(datapath)
-        schema = pa.schema([pa.field("tokens", pa.uint32())])
-        with pa.ipc.new_file(
-            os.path.join(datapath, "fileshard_1.arrow"), schema
-        ) as writer:
-            for i in range(500):
-                out = list(range(i * 100, i * 100 + 100))
-                writer.write(pa.record_batch([out], schema=schema))
-        os.makedirs(os.path.join(datapath, "subfolder"))
-        with pa.ipc.new_file(
-            os.path.join(datapath, "subfolder/fileshard_2.arrow"), schema
-        ) as writer:
-            for i in range(500):
-                out = list(range(50000 + i * 100, 50000 + i * 100 + 100))
-                writer.write(pa.record_batch([out], schema=schema))
-    else:
-        # Give other ranks time for worker 0 to finish
-        time.sleep(5)
+assert os.path.exists(datapath)
 
 # Build dataloader
 data = ScalableReader(datapath, rank, world_size, ArrowHandler, -1, seed=args.seed, max_chunksize=40, n_logical_shards=args.logical_shards)
+# Subdata sampling
+data = SamplingDataset(datapath, data, -1, ["subdata","subfolder"], [2,1])
 # Packing and slicing
 data = DocPackingDataset(data, args.seq_len, 4, -1, -2, args.n_bins)
+# Shuffling
+data = ShuffleDataset(data, window_size=10)
 # Statelessly convert all outputs to tensors
 data = PreprocessDataset(data, torch.tensor)
 # Wrap in StatefulDataLoader
