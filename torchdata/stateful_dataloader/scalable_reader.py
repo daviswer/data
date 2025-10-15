@@ -1306,7 +1306,7 @@ def load_ckpt_dcp(
                 shape = v.size,
                 stride = [1] * len(v.size),
             )
-            local_split[k] = [(i*my_size[0])//nworkers for i in range(nworkers)] + [my_size]
+            local_split[k] = [(i*my_size[0])//nworkers for i in range(nworkers)] + [my_size[0]]
             local_split[k] = [local_split[k][i+1]-local_split[k][i] for i in range(nworkers)]
     checkpoint.load(
         state_dict={"reshard": reshard_vars},
