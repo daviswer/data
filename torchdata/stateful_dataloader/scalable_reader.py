@@ -1326,22 +1326,18 @@ def load_ckpt_dcp(
 
     # Custom: key based handling
     if easy_load:
-        # Load only the current rank's key
-        prefix = f"rank{r}"
+        # Load only the current rank's key(s)
+        prefixes = [f"rank{r*nworkers+i}" for i in range(nworkers)]
         custom_vars = {
-            k : torch.empty(v.size) if isinstance(v, TensorStorageMetadata) else None 
-            for k,v in meta["custom"].items() if k[:len(prefix)] == prefix
+            k[k.find(".")+1:] : torch.empty(v.size) if isinstance(v, TensorStorageMetadata) else None 
+            for k,v in meta["custom"].items() if k[:k.find(".")] in prefixes
         }
         checkpoint.load(
             state_dict={"custom": custom_vars},
             storage_reader=checkpoint.FileSystemReader(path=path),
         )
-        # Pop __rescaling__ flag since it's not a list
-        custom_vars.pop("__rescaling__")
-        # Flip dict[list] into list[dict]
-        custom_vars = [{k:custom_vars[k][i] for k in custom_vars} for i in range(nworkers)]
-        # Set __rescaling__ flag manually
-        custom_vars["__rescaling__"] = False
+        # Convert dict of rank.[keys] to list[dict]
+        custom_vars = [{k:v for k,v in custom_vars if k[:k.find(".")] == p} for p in prefixes]
         dstate["custom"] = custom_vars
     else:
         # Load keys across ranks, compile each rankset into list. Pop and reset __rescaling__ flag
@@ -1353,19 +1349,19 @@ def load_ckpt_dcp(
             state_dict={"custom": custom_vars},
             storage_reader=checkpoint.FileSystemReader(path=path),
         )
-        # Convert dict[List] to List[dict[List]] by pulling out rank prefixes
+        # Convert dict of rank.[keys] to List[dict] by pulling out rank prefixes
         custom_vars = [
             {
-                k[k.find("."):]:custom_vars[k] 
-                for k in custom_vars 
+                k[k.find(".")+1:] : v
+                for k,v in custom_vars.items()
                 if f"rank{i}" == k[:len(f"rank{i}")]
             } for i in range(ckp_ws)
         ]
-        # Flip and fuse list[dict[list]] into dict[list]
-        custom_vars = {k:sum([c[k] for c in custom_vars], []) for k in custom_vars[0]}
+        # Flip list[dict] into dict[list]
+        custom_vars = {k:[d[k] for d in custom_vars] for k in custom_vars[0]}
         # Set __rescaling__ True
         custom_vars["__rescaling__"] = True
-        dstate["custom"] = custom_vars * nworkers
+        dstate["custom"] = [custom_vars] * nworkers
 
     if r==0:
         print("Custom loaded")
