@@ -932,8 +932,6 @@ class ScalableReader(_StatefulDataset):
             shard_states = shard_states[indices]
             sorted, indices = torch.sort(shard_states[:,4], descending=True, stable=True)
             shard_states = shard_states[indices]
-            if self.rank==0:
-                print(shard_states)
             # Strip out dummy padding shards
             n_dummies = sorted.eq(torch.iinfo(torch.int).max).sum()
             shard_states = shard_states[n_dummies:]  # n_logical 5
@@ -1356,7 +1354,7 @@ def load_ckpt_dcp(
                 k[k.find(".")+1:] : v
                 for k,v in custom_vars.items()
                 if f"rank{i}" == k[:len(f"rank{i}")]
-            } for i in range(ckp_ws)
+            } for i in range(ckp_ws * ckp_nw)
         ]
         # Flip list[dict] into dict[list]
         custom_vars = {k:[d[k] for d in custom_vars] for k in custom_vars[0]}
@@ -1384,11 +1382,11 @@ TODO: rescaling tests
 2,1 DONE
 1,2 DONE
 1,1 DONE
-1,3 
+1,3 DONE
 
 2,3:
-2,3
-1,4
+2,3 DONE
+1,4 
 2,4
 
 1,2:
