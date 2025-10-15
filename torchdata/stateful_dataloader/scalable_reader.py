@@ -1025,9 +1025,6 @@ def save_ckpt_dcp(
         # Add ckpt worldsize
         dstate["broadcast"]["global_worldsize"] = worldsize * nworkers
 
-    if rank==0:
-        print("Broadcast complete")
-
     # Reshard dict: concatenate entries, fetch global size, and wrap in sharding DTensor
     reshard_vars = dstate["reshard"]
     # Assert all reshard vals are tensors
@@ -1064,17 +1061,9 @@ def save_ckpt_dcp(
     }
     dstate["reshard"] = reshard_vars
 
-    if rank==0:
-        print("Reshard complete")
-
     # Finish up state now that reshard has added its size metadata
-    if rank==0:
-        print(state_vars)
     state_vars = wrap_dtensor(state_vars, device_mesh)
     dstate["state"] = state_vars
-
-    if rank==0:
-        print("State complete")
 
     # Custom: prepend rank to every key
     custom_vars = dstate["custom"]
@@ -1082,17 +1071,11 @@ def save_ckpt_dcp(
     custom_vars = {f"rank{rank*nworkers+i}."+k : custom_vars[i][k] for i in range(len(custom_vars)) for k in custom_vars[0].keys()}
     dstate["custom"] = custom_vars
 
-    if rank==0:
-        print("Custom complete")
-
     checkpoint.save(
         dstate,
         storage_writer=checkpoint.FileSystemWriter(path=path), 
         planner = checkpoint.DefaultSavePlanner(),
     )
-
-    if rank==0:
-        print("Global save complete")
 
 
 def save_ckpt_custom(
@@ -1251,9 +1234,6 @@ def load_ckpt_dcp(
         # Flip dict[List] to List[dict]
         state_vars = [{k:state_vars[k][i] for k in state_vars} for i in range(ckp_nw)]
         dstate["state"] = state_vars
-    
-    if r==0:
-        print("State loaded")
 
     # Broadcast: load subset, pop global worldsize
     broadcast_vars = {k:None for k in meta['broadcast']}  # Assuming flat dict
@@ -1263,9 +1243,6 @@ def load_ckpt_dcp(
         storage_reader = checkpoint.FileSystemReader(path=path),
     )
     dstate["broadcast"] = [broadcast_vars] * nworkers
-
-    if r==0:
-        print("Broadcast loaded")
     
     # Reshard: local plans
     if easy_load:
@@ -1323,9 +1300,6 @@ def load_ckpt_dcp(
     # Flip dict[List] to List[dict]
     dstate["reshard"] = [{k:v[i] for k,v in reshard_vars.items()} for i in range(nworkers)]
 
-    if r==0:
-        print("Reshard loaded")
-
     # Custom: key based handling
     if easy_load:
         # Load only the current rank's key(s)
@@ -1365,18 +1339,12 @@ def load_ckpt_dcp(
         custom_vars["__rescaling__"] = True
         dstate["custom"] = [custom_vars] * nworkers
 
-    if r==0:
-        print("Custom loaded")
-
     # Flip dict[list[dict]] into list[dict[dict]]
     dstate = [{k:dstate[k][i] for k in dstate} for i in range(nworkers)]
     # Load worker dstates back into loader
     for i in range(nworkers):
         base["_snapshot"]["_worker_snapshots"][f"worker_{i}"]["dataset_state"] = dstate[i]
     loader.load_state_dict(base)
-
-    if r==0:
-        print("Loading complete!")
         
 
 """
