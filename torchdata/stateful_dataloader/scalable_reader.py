@@ -1012,7 +1012,12 @@ def save_ckpt_dcp(
             else:
                 if v is None:
                     v = float("inf")
-                v = torch.tensor(v)[None]
+                if isinstance(v, list) and isinstance(v[0], torch.Tensor):
+                    # Special handling for list[tensor] case
+                    v = torch.cat(v)[None]
+                else:
+                    # Tensor wrapping handles Any, list[Any]
+                    v = torch.tensor(v)[None]
                 d[k] = dtensor.DTensor.from_local(v, mesh, [dtensor.placement_types.Shard(0)])
         return d
     # Pause until reshard can add its contribution
