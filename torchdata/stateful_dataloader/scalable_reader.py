@@ -1379,8 +1379,8 @@ def load_ckpt_dcp(
 """
 TODO: rescaling tests
 2,1:
-2,1
-1,2
+2,1 DONE
+1,2 
 1,1
 1,3
 
