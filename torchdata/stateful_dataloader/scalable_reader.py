@@ -1364,6 +1364,7 @@ def load_ckpt_dcp(
 
     if r==0:
         print("Custom loaded")
+        print(custom_vars)
 
     # Flip dict[list[dict]] into list[dict[dict]]
     dstate = [{k:dstate[k][i] for k in dstate} for i in range(nworkers)]
