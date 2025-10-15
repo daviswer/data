@@ -1332,6 +1332,9 @@ def load_ckpt_dcp(
             k[k.find(".")+1:] : torch.empty(v.size) if isinstance(v, TensorStorageMetadata) else None 
             for k,v in meta["custom"].items() if k[:k.find(".")] in prefixes
         }
+        if r==0:
+            print(meta["custom"])
+            print(custom_vars.keys())
         checkpoint.load(
             state_dict={"custom": custom_vars},
             storage_reader=checkpoint.FileSystemReader(path=path),
