@@ -1336,8 +1336,12 @@ def load_ckpt_dcp(
             state_dict={"custom": custom_vars},
             storage_reader=checkpoint.FileSystemReader(path=path),
         )
+        # Pop __rescaling__ flag since it's not a list
+        custom_vars.pop("__rescaling__")
         # Flip dict[list] into list[dict]
         custom_vars = [{k:custom_vars[k][i] for k in custom_vars} for i in range(nworkers)]
+        # Set __rescaling__ flag manually
+        custom_vars["__rescaling__"] = False
         dstate["custom"] = custom_vars
     else:
         # Load keys across ranks, compile each rankset into list. Pop and reset __rescaling__ flag
