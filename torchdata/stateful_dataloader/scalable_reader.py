@@ -16,6 +16,7 @@ import torch.distributed as dist
 import torch.utils.data as data
 from torch.distributed.tensor._shards_wrapper import LocalShardsWrapper
 from torch.distributed.checkpoint._storage_utils import _storage_setup
+from torch.distributed.checkpoint.metadata import TensorStorageMetadata
 from torch.distributed.checkpoint.storage import StorageReader
 
 
@@ -1327,7 +1328,10 @@ def load_ckpt_dcp(
     if easy_load:
         # Load only the current rank's key
         prefix = f"rank{r}"
-        custom_vars = {k:None for k in meta["custom"] if k[:len(prefix)] == prefix}
+        custom_vars = {
+            k : torch.empty(v.size) if isinstance(v, TensorStorageMetadata) else None 
+            for k,v in meta["custom"].items() if k[:len(prefix)] == prefix
+        }
         checkpoint.load(
             state_dict={"custom": custom_vars},
             storage_reader=checkpoint.FileSystemReader(path=path),
@@ -1337,7 +1341,10 @@ def load_ckpt_dcp(
         dstate["custom"] = custom_vars
     else:
         # Load keys across ranks, compile each rankset into list. Pop and reset __rescaling__ flag
-        custom_vars = {k:None for k in meta["custom"]}
+        custom_vars = {
+            k : torch.empty(v.size) if isinstance(v, TensorStorageMetadata) else None 
+            for k,v in meta["custom"].items()
+        }
         checkpoint.load(
             state_dict={"custom": custom_vars},
             storage_reader=checkpoint.FileSystemReader(path=path),
