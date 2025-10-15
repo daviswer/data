@@ -452,7 +452,7 @@ class ShuffleDataset(_NestedStatefulDataset):
         # Create generator if it doesn't already exist
         self.setup()
         # Write generator state manually
-        self.g_state = self.generator.get_state().clone()
+        self.g_state = self.generator.get_state().clone().tolist()
         # Prune buffer so it can be resharded in future
         self.buffer = torch.tensor(self.buffer[: self.buffer_size])
         out = super().state_dict()
@@ -466,7 +466,7 @@ class ShuffleDataset(_NestedStatefulDataset):
         self.buffer = self.buffer.tolist()
         # Manually set generator state if it exists
         if self.g_state is not None:
-            self.generator.set_state(self.g_state)
+            self.generator.set_state(torch.tensor(self.g_state, dtype=torch.uint8))
         # Manually set buffer size
         self.buffer_size = len(self.buffer)
 
@@ -1010,14 +1010,10 @@ def save_ckpt_dcp(
             if isinstance(v, dict):
                 d[k] = wrap_dtensor(v, mesh)
             else:
+                assert not isinstance(v, torch.Tensor), f"DCP saving does not currently support tensor state values. Please convert state var {k} to (nested) list."
                 if v is None:
                     v = float("inf")
-                if isinstance(v, list) and isinstance(v[0], torch.Tensor):
-                    # Special handling for list[tensor] case
-                    v = torch.cat(v)[None]
-                else:
-                    # Tensor wrapping handles Any, list[Any]
-                    v = torch.tensor(v)[None]
+                v = torch.tensor(v)[None]
                 d[k] = dtensor.DTensor.from_local(v, mesh, [dtensor.placement_types.Shard(0)])
         return d
     # Pause until reshard can add its contribution
