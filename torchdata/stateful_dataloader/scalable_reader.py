@@ -1067,6 +1067,8 @@ def save_ckpt_dcp(
         print("Reshard complete")
 
     # Finish up state now that reshard has added its size metadata
+    if rank==0:
+        print(state_vars.keys())
     state_vars = wrap_dtensor(state_vars, device_mesh)
     dstate["state"] = state_vars
 
