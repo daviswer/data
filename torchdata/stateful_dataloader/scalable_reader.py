@@ -1336,7 +1336,7 @@ def load_ckpt_dcp(
             storage_reader=checkpoint.FileSystemReader(path=path),
         )
         # Convert dict of rank.[keys] to list[dict]
-        custom_vars = [{k:v for k,v in custom_vars.items() if k[:k.find(".")] == p} for p in prefixes]
+        custom_vars = [{k[k.find(".")+1:]:v for k,v in custom_vars.items() if k[:k.find(".")] == p} for p in prefixes]
         dstate["custom"] = custom_vars
     else:
         # Load keys across ranks, compile each rankset into list. Pop and reset __rescaling__ flag
@@ -1364,7 +1364,6 @@ def load_ckpt_dcp(
 
     if r==0:
         print("Custom loaded")
-        print(custom_vars)
 
     # Flip dict[list[dict]] into list[dict[dict]]
     dstate = [{k:dstate[k][i] for k in dstate} for i in range(nworkers)]
