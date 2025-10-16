@@ -15,10 +15,155 @@ from torchdata.stateful_dataloader.scalable_reader import (
     ShuffleDataset,
     DocPackingDataset,
     ArrowHandler,
-    save_ckpt_custom,
-    load_ckpt_custom,
     _StatefulDataset,
 )
+
+
+#### -------------------------    CHECKPOINT FUNCTIONS    ------------------------- ####
+
+
+def save_ckpt_custom(
+    loader: StatefulDataLoader,
+    path: str,
+):
+    """
+    Retrieves dataloader state dict, and separates worker states from loader state.
+    Aggregates worker states, and separates out state/broadcast/reshard/custom variables.
+    Saves each state dict separately. 
+    """
+    os.makedirs(path, exist_ok=True)
+    rank = loader.dataset.rank
+    state = deepcopy(loader.state_dict())
+    dstate = state["_snapshot"]["_worker_snapshots"]
+    dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]  # List[dict]
+    # Flip List[dict[dict]] to dict[List[dict]]
+    dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}
+
+    # State dict: add loader state and save as is
+    state_vars = dstate["state"]
+    state_vars.append(state)
+    torch.save(
+        state_vars,
+        os.path.join(path, f"loader_state_{rank}.pth"),
+    )
+    
+    # Broadcast dict: Save only first entry, only if rank is 0
+    if rank == 0:
+        broadcast_vars = dstate["broadcast"][0]
+        torch.save(
+            broadcast_vars,
+            os.path.join(path, f"loader_broadcast.pth"),
+        )
+    
+    # Reshard dict: Assert is tensor and aggregate values
+    reshard_vars = dstate["reshard"]
+    # Assert all reshard vals are tensors
+    for k,v in reshard_vars[0].items():
+        assert isinstance(v, torch.Tensor), f"Reshard var {k} is not a torch tensor!"
+    # Flip list[dict] to dict[list]
+    reshard_vars = {k:[d[k] for d in reshard_vars] for k in reshard_vars[0].keys()}
+    torch.save(
+        reshard_vars,
+        os.path.join(path, f"loader_reshard_{rank}.pth"),
+    )
+    
+    # Custom dict: Aggregate lists of (val,fn) tuples into tuples of (list[val], fn)
+    # (assumes fn is consistent across ranks)
+    custom_vars = dstate["custom"]
+    # Flip list[dict] into dict[list]
+    custom_vars = {k:[d[k] for d in custom_vars] for k in custom_vars[0].keys()}
+    torch.save(
+        custom_vars,
+        os.path.join(path, f"loader_custom_{rank}.pth"),
+    )
+
+
+def load_ckpt_custom(
+    loader: StatefulDataLoader,
+    path: str,
+):
+    """
+    Retrieves dataloader state dict, and separates worker states from loader state.
+    Handle loading/rescaling for the 4 tags.
+    """
+    base = loader.state_dict()
+    nworkers = base["_snapshot"]["_main_snapshot"]["_num_workers"]
+    r = loader.dataset.rank
+    w = loader.dataset.worldsize
+    dstate = base["_snapshot"]["_worker_snapshots"]
+    dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]  # List[dict]
+    # Flip List[dict[dict]] to dict[List[dict]]
+    dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}    inp = {"state":deepcopy(base), "dstate":dstate}
+    
+    ckp_ws = 0 if not os.path.exists(path) else len([x for x in os.listdir(path) if "loader_state_" in x])
+    easy_load = False
+    if ckp_ws == w:
+        state_vars = torch.load(os.path.join(path, f"loader_state_{r}.pth"))
+        loader_state = state_vars.pop(-1)
+        easy_load = nworkers == loader_state["_snapshot"]["_main_snapshot"]["_num_workers"]
+    
+    # State: load if easy, otherwise ignore
+    if easy_load:
+        # Loader state
+        base = loader_state
+        # Worker states
+        dstate["state"] = state_vars
+
+    # Broadcast: load across all cases
+    broadcast_vars = torch.load(os.path.join(path, f"loader_broadcast.pth"))
+    dstate["broadcast"] = [broadcast_vars] * nworkers
+
+    # Reshard: if easy, flip labels; else concat and reshard
+    if easy_load:
+        reshard_vars = torch.load(os.path.join(path, f"loader_reshard_{r}.pth"))
+        # Flip dict[list] back to list[dict]
+        reshard_vars = [{k:reshard_vars[k][i] for k in reshard_vars} for i in range(nworkers)]
+        dstate["reshard"] = reshard_vars
+    else:
+        # Load all shards
+        reshard_vars = [torch.load(os.path.join(path, f"loader_reshard_{i}.pth")) for i in range(ckp_ws)]  # list[dict[list]]
+        # Flip list[dict[list]] to dict[list[list]]
+        reshard_vars = {k:[reshard_vars[i][k] for i in range(ckp_ws)] for k in reshard_vars[0]}
+        # Conjoin and concat inner lists: dict[list[list]] -> dict[tensor]
+        reshard_vars = {k:torch.cat(sum(reshard_vars[k], []), dim=0) for k in reshard_vars}
+        # For each local worker, pull out relevant shard
+        reshard_state = [{} for _ in range(nworkers)]
+        for local_r in range(r*nworkers, r*nworkers+nworkers):
+            for k in reshard_vars:
+                val = reshard_vars[k]
+                reshard_state[local_r-r*nworkers][k] = val[
+                    round(val.size(0)*local_r/(w*nworkers)) : round(val.size(0)*(local_r+1)/(w*nworkers))
+                ]
+        dstate["reshard"] = reshard_state
+
+    # Custom: if easy, flip labels; else concat and run custom fn
+    if easy_load:
+        custom_vars = torch.load(os.path.join(path, f"loader_custom_{r}.pth"))
+        # Flip dict[list] into list[dict]
+        custom_vars = [{k:custom_vars[k][i] for k in custom_vars} for i in range(nworkers)]
+        dstate["custom"] = custom_vars
+    else:
+        # Load all shards
+        custom_vars = [torch.load(os.path.join(path, f"loader_custom_{i}.pth")) for i in range(ckp_ws)]  # list[dict[list]]
+        # Pop __rescaling__ values since they can't be reformatted/compiled like the other, proper values
+        [d.pop("__rescaling__") for d in custom_vars]
+        # Flip and fuse list[dict[list]] into dict[list]
+        custom_vars = {k:sum([c[k] for c in custom_vars], []) for k in custom_vars[0]}
+        # Set __rescaling__ flag
+        custom_vars["__rescaling__"] = True
+        # Expand dict[list] to list[dict[list]] via replication
+        dstate["custom"] = [custom_vars] * nworkers
+
+    # Flip dict[list[dict]] into list[dict[dict]]
+    dstate = [{k:dstate[k][i] for k in dstate} for i in range(nworkers)]
+    # Load worker dstates back into loader
+    for i in range(nworkers):
+        base["_snapshot"]["_worker_snapshots"][f"worker_{i}"]["dataset_state"] = dstate[i]
+    loader.load_state_dict(base)
+
+
+#### -------------------------    TEST SETUP    ------------------------- ####
+
 
 # Generates test data in a temp directory, and returns that tempdir object.
 # (file path can be retrieved via tempdir.name)
@@ -123,6 +268,10 @@ basicmessy = functools.partial(
     nbins=17,
     window=27,
 )
+
+
+#### -------------------------    UNIT TESTS    ------------------------- ####
+
 
 def test_single_epoch():
     # For varying worldsizes, logical shard partitions, and chunk sizes,

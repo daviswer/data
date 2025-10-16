@@ -1005,17 +1005,6 @@ def save_ckpt_dcp(
     # Flip List[dict] to dict[List]
     state_vars = {k:[d[k] for d in state_vars] for k in state_vars[0].keys()}
     state_vars["loader_state"] = state
-    def wrap_dtensor(d, mesh):
-        for k,v in d.items():
-            if isinstance(v, dict):
-                d[k] = wrap_dtensor(v, mesh)
-            else:
-                assert not isinstance(v, torch.Tensor), f"DCP saving does not currently support tensor state values. Please convert state var {k} to (nested) list."
-                if v is None:
-                    v = float("inf")
-                v = torch.tensor(v)[None]
-                d[k] = dtensor.DTensor.from_local(v, mesh, [dtensor.placement_types.Shard(0)])
-        return d
     # Pause until reshard can add its contribution
 
     # Broadcast dict: save only first entry, only if rank is 0
@@ -1025,14 +1014,15 @@ def save_ckpt_dcp(
         # Add ckpt worldsize
         dstate["broadcast"]["global_worldsize"] = worldsize * nworkers
 
-    # Reshard dict: concatenate entries, fetch global size, and wrap in sharding DTensor
+    # Reshard dict: concatenate entries, fetch global size, 
+    # wrap in sharding DTensor, store partial sizes in State
     reshard_vars = dstate["reshard"]
     # Assert all reshard vals are tensors
     for k,v in reshard_vars[0].items():
         assert isinstance(v, torch.Tensor), f"Reshard var {k} is not a torch tensor!"
     # Flip list[dict] to dict[list]
     reshard_vars = {k:[d[k] for d in reshard_vars] for k in reshard_vars[0].keys()}
-    # Inject sizes into dstate["state"] for use when not rescaling
+    # Inject per-worker shard sizes into dstate["state"] for use when not rescaling
     state_vars["reshard_sizes"] = {
         k:[x.size(0) for x in v]
         for k,v in reshard_vars.items()
@@ -1062,6 +1052,17 @@ def save_ckpt_dcp(
     dstate["reshard"] = reshard_vars
 
     # Finish up state now that reshard has added its size metadata
+    def wrap_dtensor(d, mesh):
+        for k,v in d.items():
+            if isinstance(v, dict):
+                d[k] = wrap_dtensor(v, mesh)
+            else:
+                assert not isinstance(v, torch.Tensor), f"DCP saving does not currently support tensor state values. Please convert state var {k} to (nested) list."
+                if v is None:
+                    v = float("inf")
+                v = torch.tensor(v)[None]
+                d[k] = dtensor.DTensor.from_local(v, mesh, [dtensor.placement_types.Shard(0)])
+        return d
     state_vars = wrap_dtensor(state_vars, device_mesh)
     dstate["state"] = state_vars
 
@@ -1075,62 +1076,6 @@ def save_ckpt_dcp(
         dstate,
         storage_writer=checkpoint.FileSystemWriter(path=path), 
         planner = checkpoint.DefaultSavePlanner(),
-    )
-
-
-def save_ckpt_custom(
-    loader: StatefulDataLoader,
-    path: str,
-):
-    """
-    Retrieves dataloader state dict, and separates worker states from loader state.
-    Aggregates worker states, and separates out state/broadcast/reshard/custom variables.
-    Saves each state dict separately. 
-    """
-    os.makedirs(path, exist_ok=True)
-    rank = loader.dataset.rank
-    state = deepcopy(loader.state_dict())
-    dstate = state["_snapshot"]["_worker_snapshots"]
-    dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]  # List[dict]
-    # Flip List[dict[dict]] to dict[List[dict]]
-    dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}
-
-    # State dict: add loader state and save as is
-    state_vars = dstate["state"]
-    state_vars.append(state)
-    torch.save(
-        state_vars,
-        os.path.join(path, f"loader_state_{rank}.pth"),
-    )
-    
-    # Broadcast dict: Save only first entry, only if rank is 0
-    if rank == 0:
-        broadcast_vars = dstate["broadcast"][0]
-        torch.save(
-            broadcast_vars,
-            os.path.join(path, f"loader_broadcast.pth"),
-        )
-    
-    # Reshard dict: Assert is tensor and aggregate values
-    reshard_vars = dstate["reshard"]
-    # Assert all reshard vals are tensors
-    for k,v in reshard_vars[0].items():
-        assert isinstance(v, torch.Tensor), f"Reshard var {k} is not a torch tensor!"
-    # Flip list[dict] to dict[list]
-    reshard_vars = {k:[d[k] for d in reshard_vars] for k in reshard_vars[0].keys()}
-    torch.save(
-        reshard_vars,
-        os.path.join(path, f"loader_reshard_{rank}.pth"),
-    )
-    
-    # Custom dict: Aggregate lists of (val,fn) tuples into tuples of (list[val], fn)
-    # (assumes fn is consistent across ranks)
-    custom_vars = dstate["custom"]
-    # Flip list[dict] into dict[list]
-    custom_vars = {k:[d[k] for d in custom_vars] for k in custom_vars[0].keys()}
-    torch.save(
-        custom_vars,
-        os.path.join(path, f"loader_custom_{rank}.pth"),
     )
 
 
@@ -1152,6 +1097,7 @@ def load_ckpt_dcp(
     # Flip List[dict[dict]] to dict[List[dict]]
     dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}    inp = {"state":deepcopy(base), "dstate":dstate}
     
+    # Determine if we're rescaling or not
     ckp_ws = 0 if not os.path.exists(path) else len([x for x in os.listdir(path) if ".distcp" in x])
     d = {'broadcast':{'global_worldsize':0}}
     checkpoint.load(
@@ -1161,12 +1107,7 @@ def load_ckpt_dcp(
     ckp_nw = d['broadcast']['global_worldsize'] // ckp_ws
     easy_load = ckp_ws == w and ckp_nw == nworkers
     
-    def unwrap_dtensor(x, meta):
-        x = x.to_local().tolist()[0]
-        if x == float("inf"):
-            x = None
-        return x
-    
+    # Fetch checkpoint metadata
     def list_stored_state_dict(
         checkpoint_id: Union[str, os.PathLike, None] = None,
         storage_reader: Optional[StorageReader] = None,
@@ -1182,7 +1123,6 @@ def load_ckpt_dcp(
         md = storage_reader.read_metadata()
         sd = md.state_dict_metadata  # flattened dict.
         return sd
-    
     meta_flat = list_stored_state_dict(checkpoint_id=path)
     # Unflatten dict one level
     meta = {field:{k[len(field)+1:]:v for k,v in meta_flat.items() if field in k[:k.find('.')]} 
@@ -1202,31 +1142,34 @@ def load_ckpt_dcp(
             d = d[subk]
         d[trace[-1]] = meta["state"].pop("loader_state."+key)
     meta["state"]["loader_state"] = loadermeta
-
-    def crawl(d, m, f):
-    # Crawl nested dict d using metadata m, applying function f to every non-dict entry.
-    # If d doesn't have a corresponding entry from m, creates one.
-    # Function f should take two arguments, the entry from d and from m respectively.
-        for k,v in m.items():
-            if isinstance(v, dict):
-                d[k] = crawl(d.get(k, {}), m[k], f)
-            else:
-                d[k] = f(d.get(k, None), v)
-        return d
-    
-    def build_dtensor(x, meta, rank, mesh):
-        x = torch.empty(meta.chunks[rank].sizes, dtype=meta.properties.dtype)
-        return dtensor.DTensor.from_local(x, mesh, [dtensor.placement_types.Shard(0)])
     
     # State: load if easy, otherwise ignore
     if easy_load:
-        # Flesh with dtensors, load straightforwardly
+        def crawl(d, m, f):
+        # Crawl nested dict d using metadata m, applying function f to every non-dict entry.
+        # If d doesn't have a corresponding entry from m, creates one.
+        # Function f should take two arguments, the entry from d and from m respectively.
+            for k,v in m.items():
+                if isinstance(v, dict):
+                    d[k] = crawl(d.get(k, {}), m[k], f)
+                else:
+                    d[k] = f(d.get(k, None), v)
+            return d
+        def build_dtensor(x, meta, rank, mesh):
+            x = torch.empty(meta.chunks[rank].sizes, dtype=meta.properties.dtype)
+            return dtensor.DTensor.from_local(x, mesh, [dtensor.placement_types.Shard(0)])
+        # Built placeholder DTensors, load straightforwardly
         state_vars = crawl({}, meta['state'], functools.partial(build_dtensor, rank=r, mesh=device_mesh))
         checkpoint.load(
             state_dict = {"state":state_vars},
             storage_reader = checkpoint.FileSystemReader(path=path),
         )
         # Convert back from dtensor
+        def unwrap_dtensor(x, _):
+            x = x.to_local().tolist()[0]
+            if x == float("inf"):
+                x = None
+            return x
         state_vars = crawl(state_vars, meta['state'], unwrap_dtensor)
         # Pull out manually added subdicts
         base = state_vars.pop("loader_state")
@@ -1235,16 +1178,15 @@ def load_ckpt_dcp(
         state_vars = [{k:state_vars[k][i] for k in state_vars} for i in range(ckp_nw)]
         dstate["state"] = state_vars
 
-    # Broadcast: load subset, pop global worldsize
+    # Broadcast: load relevant key subset, replicate across workers
     broadcast_vars = {k:None for k in meta['broadcast']}  # Assuming flat dict
-    # broadcast_vars = crawl({}, meta['broadcast'], lambda x,m: None)
     checkpoint.load(
         state_dict = {"broadcast":broadcast_vars},
         storage_reader = checkpoint.FileSystemReader(path=path),
     )
     dstate["broadcast"] = [broadcast_vars] * nworkers
     
-    # Reshard: local plans
+    # Reshard: build local plans from metadata
     if easy_load:
         # Load back individual mismatched shards by reconstructing LocalShardsWrappers 
         # from corresponding ChunkMetadata
@@ -1300,7 +1242,7 @@ def load_ckpt_dcp(
     # Flip dict[List] to List[dict]
     dstate["reshard"] = [{k:v[i] for k,v in reshard_vars.items()} for i in range(nworkers)]
 
-    # Custom: key based handling
+    # Custom: load individually or in aggregate, based on key rank-prefixes
     if easy_load:
         # Load only the current rank's key(s)
         prefixes = [f"rank{r*nworkers+i}" for i in range(nworkers)]
@@ -1316,7 +1258,8 @@ def load_ckpt_dcp(
         custom_vars = [{k[k.find(".")+1:]:v for k,v in custom_vars.items() if k[:k.find(".")] == p} for p in prefixes]
         dstate["custom"] = custom_vars
     else:
-        # Load keys across ranks, compile each rankset into list. Pop and reset __rescaling__ flag
+        # Load keys across ranks, compile each rankset into global list. 
+        # Pop and reset __rescaling__ flag.
         custom_vars = {
             k : torch.empty(v.size, dtype=v.properties.dtype) if isinstance(v, TensorStorageMetadata) else None 
             for k,v in meta["custom"].items()
@@ -1367,222 +1310,3 @@ TODO: rescaling tests
 2,2 more complex:
 1,3 DONE 
 """
-
-# TODO: shift custom fns into testing file
-
-def load_ckpt_custom(
-    loader: StatefulDataLoader,
-    path: str,
-):
-    """
-    Retrieves dataloader state dict, and separates worker states from loader state.
-    Handle loading/rescaling for the 4 tags.
-    """
-    base = loader.state_dict()
-    nworkers = base["_snapshot"]["_main_snapshot"]["_num_workers"]
-    r = loader.dataset.rank
-    w = loader.dataset.worldsize
-    dstate = base["_snapshot"]["_worker_snapshots"]
-    dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]  # List[dict]
-    # Flip List[dict[dict]] to dict[List[dict]]
-    dstate = {k:[d[k] for d in dstate] for k in dstate[0].keys()}  # {state, broadcast, reshard, custom}    inp = {"state":deepcopy(base), "dstate":dstate}
-    
-    ckp_ws = 0 if not os.path.exists(path) else len([x for x in os.listdir(path) if "loader_state_" in x])
-    easy_load = False
-    if ckp_ws == w:
-        state_vars = torch.load(os.path.join(path, f"loader_state_{r}.pth"))
-        loader_state = state_vars.pop(-1)
-        easy_load = nworkers == loader_state["_snapshot"]["_main_snapshot"]["_num_workers"]
-    
-    # State: load if easy, otherwise ignore
-    if easy_load:
-        # Loader state
-        base = loader_state
-        # Worker states
-        dstate["state"] = state_vars
-
-    # Broadcast: load across all cases
-    broadcast_vars = torch.load(os.path.join(path, f"loader_broadcast.pth"))
-    dstate["broadcast"] = [broadcast_vars] * nworkers
-
-    # Reshard: if easy, flip labels; else concat and reshard
-    if easy_load:
-        reshard_vars = torch.load(os.path.join(path, f"loader_reshard_{r}.pth"))
-        # Flip dict[list] back to list[dict]
-        reshard_vars = [{k:reshard_vars[k][i] for k in reshard_vars} for i in range(nworkers)]
-        dstate["reshard"] = reshard_vars
-    else:
-        # Load all shards
-        reshard_vars = [torch.load(os.path.join(path, f"loader_reshard_{i}.pth")) for i in range(ckp_ws)]  # list[dict[list]]
-        # Flip list[dict[list]] to dict[list[list]]
-        reshard_vars = {k:[reshard_vars[i][k] for i in range(ckp_ws)] for k in reshard_vars[0]}
-        # Conjoin and concat inner lists: dict[list[list]] -> dict[tensor]
-        reshard_vars = {k:torch.cat(sum(reshard_vars[k], []), dim=0) for k in reshard_vars}
-        # For each local worker, pull out relevant shard
-        reshard_state = [{} for _ in range(nworkers)]
-        for local_r in range(r*nworkers, r*nworkers+nworkers):
-            for k in reshard_vars:
-                val = reshard_vars[k]
-                reshard_state[local_r-r*nworkers][k] = val[
-                    round(val.size(0)*local_r/(w*nworkers)) : round(val.size(0)*(local_r+1)/(w*nworkers))
-                ]
-        dstate["reshard"] = reshard_state
-
-    # Custom: if easy, flip labels; else concat and run custom fn
-    if easy_load:
-        custom_vars = torch.load(os.path.join(path, f"loader_custom_{r}.pth"))
-        # Flip dict[list] into list[dict]
-        custom_vars = [{k:custom_vars[k][i] for k in custom_vars} for i in range(nworkers)]
-        dstate["custom"] = custom_vars
-    else:
-        # Load all shards
-        custom_vars = [torch.load(os.path.join(path, f"loader_custom_{i}.pth")) for i in range(ckp_ws)]  # list[dict[list]]
-        # Pop __rescaling__ values since they can't be reformatted/compiled like the other, proper values
-        [d.pop("__rescaling__") for d in custom_vars]
-        # Flip and fuse list[dict[list]] into dict[list]
-        custom_vars = {k:sum([c[k] for c in custom_vars], []) for k in custom_vars[0]}
-        # Set __rescaling__ flag
-        custom_vars["__rescaling__"] = True
-        # Expand dict[list] to list[dict[list]] via replication
-        dstate["custom"] = [custom_vars] * nworkers
-
-    # Flip dict[list[dict]] into list[dict[dict]]
-    dstate = [{k:dstate[k][i] for k in dstate} for i in range(nworkers)]
-    # Load worker dstates back into loader
-    for i in range(nworkers):
-        base["_snapshot"]["_worker_snapshots"][f"worker_{i}"]["dataset_state"] = dstate[i]
-    loader.load_state_dict(base)
-
-
-# def dummydata():
-#     data = tempfile.TemporaryDirectory()
-#     datapath = data.name
-#     schema = pa.schema([pa.field("tokens", pa.uint32())])
-#     os.makedirs(os.path.join(datapath, "subdataset"))
-#     with pa.ipc.new_file(
-#         os.path.join(datapath, "subdataset/fileshard_1.arrow"), schema
-#     ) as writer:
-#         for i in range(500):
-#             out = list(range(i * 100, i * 100 + 100))
-#             writer.write(pa.record_batch([out], schema=schema))
-#     os.makedirs(os.path.join(datapath, "subfolder"))
-#     with pa.ipc.new_file(
-#         os.path.join(datapath, "subfolder/fileshard_2.arrow"), schema
-#     ) as writer:
-#         for i in range(500):
-#             out = list(range(50000 + i * 100, 50000 + i * 100 + 100))
-#             writer.write(pa.record_batch([out], schema=schema))
-#     return data
-
-# def dummytest():
-#     data = dummydata()
-#     path=data.name
-#     test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
-#     l = StatefulDataLoader(test, batch_size=1, num_workers=2)
-#     for i,out in enumerate(l):
-#         if i==463:
-#             break
-#     save_ckpt_custom(l, path)
-#     print(l.state_dict())
-
-#     test2 = ScalableReader(path, 2, 5, ArrowHandler, -1, n_logical_shards=10)
-#     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
-#     load_ckpt_custom(l2, path)
-#     out = iter(l2)
-#     print(next(out)[0])
-#     print(l2.state_dict())
-
-# def docpacktest():
-#     data = dummydata()
-#     path=data.name
-#     test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
-#     test = DocPackingDataset(test, 30, 0, -1, -2, 4)
-#     l = StatefulDataLoader(test, batch_size=1, num_workers=2)
-#     for i,out in enumerate(l):
-#         if i==480:
-#             break
-#     save_ckpt_custom(l, path)
-#     print(l.state_dict())
-
-#     test2 = ScalableReader(path, 0, 5, ArrowHandler, -1, n_logical_shards=10)
-#     test2 = DocPackingDataset(test2, 30, 8, -1, -2, 2)
-#     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
-#     load_ckpt_custom(l2, path)
-#     out = iter(l2)
-#     print(next(out))
-#     print(next(out))
-#     print(next(out))
-#     print(l2.state_dict())
-
-# def shuffletest():
-#     data = dummydata()
-#     path=data.name
-#     test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
-#     test = ShuffleDataset(test, 4)
-#     l = StatefulDataLoader(test, batch_size=1, num_workers=1)
-#     for i,out in enumerate(l):
-#         if i==480:
-#             break
-#     # return
-#     save_ckpt_custom(l, path)
-#     print(l.state_dict())
-
-#     test2 = ScalableReader(path, 3, 5, ArrowHandler, -1, n_logical_shards=10)
-#     test2 = ShuffleDataset(test2, 4)
-#     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
-#     load_ckpt_custom(l2, path)
-#     out = iter(l2)
-#     print(next(out))
-#     print(next(out))
-#     print(next(out))
-#     print(l2.state_dict())
-
-# def sampletest():
-#     data = dummydata()
-#     path=data.name
-#     test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
-#     test = SamplingDataset(path, test, -1, ["subdataset", "subfolder"], [2,1])
-#     l = StatefulDataLoader(test, batch_size=1, num_workers=1)
-#     for i,out in enumerate(l):
-#         if i==48:
-#             break
-#     # return
-#     save_ckpt_custom(l, path)
-#     print(l.state_dict())
-
-#     test2 = ScalableReader(path, 3, 5, ArrowHandler, -1, n_logical_shards=10)
-#     test2 = SamplingDataset(path, test2, -1, ["subdataset", "subfolder"], [2,1])
-#     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
-#     load_ckpt_custom(l2, path)
-#     out = iter(l2)
-#     print(next(out))
-#     print(next(out))
-#     print(next(out))
-#     print(l2.state_dict())
-
-# def fulltest():
-#     data = dummydata()
-#     path=data.name
-#     test = ScalableReader(path, 0, 1, ArrowHandler, -1, n_logical_shards=10)
-#     test = SamplingDataset(path, test, -1, ["subdataset", "subfolder"], [2,1])
-#     test = DocPackingDataset(test, 30, 0, -1, -2, 4)
-#     test = ShuffleDataset(test, 10)
-#     l = StatefulDataLoader(test, batch_size=1, num_workers=1)
-#     for i,out in enumerate(l):
-#         if i==480:
-#             break
-#     # return
-#     save_ckpt_custom(l, path)
-#     print(l.state_dict())
-
-#     test2 = ScalableReader(path, 3, 5, ArrowHandler, -1, n_logical_shards=10)
-#     test2 = SamplingDataset(path, test2, -1, ["subdataset", "subfolder"], [2,1])
-#     test2 = DocPackingDataset(test2, 30, 8, -1, -2, 2)
-#     test2 = ShuffleDataset(test2, 4)
-#     l2 = StatefulDataLoader(test2, batch_size=1, num_workers=2)
-#     load_ckpt_custom(l2, path)
-#     out = iter(l2)
-#     print(next(out))
-#     print(next(out))
-#     print(next(out))
-#     print(l2.state_dict())
