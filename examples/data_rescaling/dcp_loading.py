@@ -97,3 +97,16 @@ else:
     print()
     time.sleep(rank)
     print(data.state_dict())
+
+    for i, inp in enumerate(data):
+        if i == args.n_steps-1:
+            if rank == 0:
+                print("Iteration complete!")
+            break
+    
+    print()
+    print(inp)
+
+    print()
+    time.sleep(rank)
+    print(data.state_dict())
