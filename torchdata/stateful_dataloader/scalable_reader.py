@@ -1305,7 +1305,7 @@ def load_ckpt_dcp(
         # Load only the current rank's key(s)
         prefixes = [f"rank{r*nworkers+i}" for i in range(nworkers)]
         custom_vars = {
-            k : torch.empty(v.size) if isinstance(v, TensorStorageMetadata) else None 
+            k : torch.empty(v.size, dtype=v.properties.dtype) if isinstance(v, TensorStorageMetadata) else None 
             for k,v in meta["custom"].items() if k[:k.find(".")] in prefixes
         }
         checkpoint.load(
@@ -1318,7 +1318,7 @@ def load_ckpt_dcp(
     else:
         # Load keys across ranks, compile each rankset into list. Pop and reset __rescaling__ flag
         custom_vars = {
-            k : torch.empty(v.size) if isinstance(v, TensorStorageMetadata) else None 
+            k : torch.empty(v.size, dtype=v.properties.dtype) if isinstance(v, TensorStorageMetadata) else None 
             for k,v in meta["custom"].items()
         }
         checkpoint.load(
