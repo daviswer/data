@@ -24,8 +24,8 @@ from .stateful_dataloader import StatefulDataLoader
 
 """
 This file borrows the StatefulDataset framework from the IBM fms-fsdp repo to implement rescalable data
-loading. This framework is analogous to the existing torchdata nodes framework and will be converted
-in the future.
+loading. This framework is analogous to the existing torchdata nodes framework and will likely be 
+converted in the future.
 
 Rescalability is implemented at the base level - you must use this layer to interface with a collection
 of indexable files directly. The ScalableReader then yields data values like an iterator. These values
@@ -57,9 +57,10 @@ a user-provided resharding function, for when more sophisticated behavior is req
 _StatefulDataset stub illustrates usage. 
 
 Differently tagged state values are saved under separate state sub-dictionaries. A separate saving/loading
-framework is required for aggregating state dicts from workers and saving/loading to disk. The current
-code is a custom naive implementation, and will be deprecated to testing purposes as we pivot
-to DCP integration.
+framework is required for aggregating state dicts from workers and saving/loading to disk. We leverage
+PyTorch Distributed Checkpointing (DCP) to implement saving, loading, and rescaling distributed checkpoints.
+A simplified, asynchronous (but also much less efficient) implementation is provided in the unit testing 
+script for validation and illustration purposes.
 """
 
 
@@ -979,6 +980,48 @@ class ScalableReader(_StatefulDataset):
 #### -------------------------    CHECKPOINT FUNCTIONS    ------------------------- ####
 
 
+"""
+The following saving/loading functions use PyTorch DCP to handle distributed transfer of dataloader
+state dict objects to and from disk. Implements specified scaling behavior for the four tag types,
+depending on whether or not rescaling is being performed at load time:
+
+1. State: State variables are wrapped in DTensors and saved via DCP. At load time, values are loaded
+back only when not rescaling. If rescaling, the checkpoint values are ignored. Some additional metadata
+saved under this category, including: 1) the state_dict of the torchdata DataLoader itself, and 2) the
+sizes of the reshard variables across each rank's individual worker threads.
+2. Broadcast: Broadcast variables are saved from rank 0 only as generic state dict entries. At load
+time, these values are loaded back and replicated to each rank and worker.
+3. Reshard: Reshard variables are wrapped in DTensors, sharding on dim 0, with added support for 
+different sizes in dim 0 across workers and ranks. When loading without rescaling, the (possibly
+uneven) shards are loaded back exactly as saved. When rescaling, entries are pooled into a single tensor,
+and resharded on dim 0 as evenly as possible across ranks, then workers.
+4. Custom: Custom variables are saved as generic state dict entries, with global rank prepended to
+keys to prevent dict collisions. When loading without rescaling, only the entry from the same rank
+is loaded back. When rescaling, all ranks' worth of entries are loaded, and passed into the Dataset
+as a dict of lists of values. The _StatefulDataset.custom_fns are then used to perform custom 
+resharding as specified, during _StatefulDataset.load_state_dict().
+
+This approach imposes the following restrictions on checkpoint format:
+
+1. Top-level dict has four keys ("state", "broadcast", "reshard", "custom") holding subdicts for
+each of the four tag categories above.
+2. Subdicts (ignoring the additional metadata added to "state") are assumed to be flat. Thus any
+additions to the _StatefulDataset pipeline must also maintain this "dict of flat subdicts" format.
+3. Every value in "state" must be convertible into a torch.Tensor when arranged into a list. 
+In particular, if a variable in "state" has values x1, x2, x3 across 3 workers, then 
+torch.tensor([x1,x2,x3]) must produce a legal torch.Tensor. Note that this restriction also applies
+to StatefulDataLoader state dict entries, since these are placed inside of the "state" subdict.
+4. Every value in "broadcast" is assumed to NOT be a torch.Tensor (as DCP handles tensors and
+non-tensors differently). 
+5. Every value in "reshard" must be a torch.Tensor, with resharding performed on dim 0.
+6. Every value in "custom" must be EITHER a torch.Tensor, or a non-tensor or other data structure
+containing only non-tensors. Behavior for list[torch.Tensor], for example,  is currently undefined 
+(due to DCP's separate handling of tensors vs non-tensors).
+
+These can be addressed with further effort, if they prove problematic.
+"""
+
+
 def save_ckpt_dcp(
     loader: StatefulDataLoader,
     path: str,
@@ -1130,7 +1173,7 @@ def load_ckpt_dcp(
     # Unflatten reshard sizes
     loaderflags = [k[k.find('.')+1:] for k in meta["state"] if "reshard_sizes" in k[:k.find('.')]]
     meta["state"]["reshard_sizes"] = {k:meta["state"].pop("reshard_sizes."+k) for k in loaderflags}
-    # Unflatten loader state fully
+    # Unflatten loader state fully. Avoid unflattening other state subdicts.
     loaderflags = [k[k.find('.')+1:] for k in meta["state"] if "loader_state" in k[:k.find('.')]]
     loadermeta = {}
     for key in loaderflags:
@@ -1205,6 +1248,7 @@ def load_ckpt_dcp(
                 stride = [1] * len(v.size),
             ) for k,v in meta['reshard'].items()
         }
+        # Retrieve local worker splits from "state"
         local_split = reshard_sizes
     else:
         reshard_vars = {}
@@ -1228,6 +1272,7 @@ def load_ckpt_dcp(
                 shape = v.size,
                 stride = [1] * len(v.size),
             )
+            # Repeat sharding process for local partition over workers
             local_split[k] = [(i*my_size[0])//nworkers for i in range(nworkers)] + [my_size[0]]
             local_split[k] = [local_split[k][i+1]-local_split[k][i] for i in range(nworkers)]
     checkpoint.load(
@@ -1238,7 +1283,7 @@ def load_ckpt_dcp(
     reshard_vars = {
         k: v.to_local().local_shards()[0].split(local_split[k])
         for k,v in reshard_vars.items()
-    }
+    }  # Assuming flat dict
     # Flip dict[List] to List[dict]
     dstate["reshard"] = [{k:v[i] for k,v in reshard_vars.items()} for i in range(nworkers)]
 
