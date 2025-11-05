@@ -1,0 +1,98 @@
+import os
+import pyarrow as pa
+from abc import ABCMeta, abstractmethod
+from typing import List, Set
+
+
+"""
+TODO: blurb
+"""
+
+
+class ShardFileHandler(object, metaclass=ABCMeta):
+    """
+    Stub for shard file readers of different formats.
+    Must implement open, length, indexing, and slicing functions.
+    """
+
+    def is_legal(self, filepath: str):
+        """
+        Given a file path, determine if it qualifies for this handler.
+        Ideally does not involve opening the file.
+        """
+        return os.path.isfile(filepath)
+
+    @abstractmethod
+    def open(self, path: str):
+        """
+        Open the file, to be indexed via self.get() method.
+        Avoid reading entire multi-Gb files when possible!
+        """
+        pass
+
+    @abstractmethod
+    def length(self, path: str):
+        """
+        Calculate the number of documents in the given file.
+        Avoid reading entire multi-Gb files when possible!
+        """
+        pass
+
+    @abstractmethod
+    def get(self, reader, index: int, drop_tokens: Set):
+        """
+        Given the output of self.open() and an index, return the document at that index.
+        Then, remove the first and/or last items if they appear in drop_tokens.
+        Try to avoid reading entire documents at a time in case of long documents,
+        but this is less important than avoiding reading entire files as above.
+        Output must support len() method.
+        """
+        pass
+
+    @abstractmethod
+    def slice(self, doc, index: int, n_pull: int) -> List:
+        """
+        Given a long document, retrieve n_pull consecutive items starting from index.
+        Again, try to be memory-efficient when doing so, but efficiency in self.get()
+        and self.open() is far more important.
+        Must return a python list.
+        """
+        pass
+
+
+class ArrowHandler(ShardFileHandler):
+    """
+    Reader for indexable, pre-tokenized PyArrow shard files.
+    Pyarrow shard files are expected to hold multiple RecordBatches,
+    where each RecordBatch has a "tokens" field consisting of
+    a single token list (i.e. each document is a single sequence
+    under a "token" field, and the file is a list of such sequences).
+
+    A preferred format as we can load document chunks without having to ever pull
+    the entire document or shard file, allowing for graceful handling of large documents.
+    Non-standard data format, though.
+    """
+
+    def __init__(self, col_name: str = "tokens"):
+        self.col_name = col_name
+
+    def is_legal(self, filepath: str):
+        return "arrow" in os.path.splitext(filepath)[1]
+
+    def open(self, path: str):
+        return pa.ipc.open_file(pa.memory_map(path))
+
+    def length(self, path: str):
+        return self.open(path).num_record_batches
+
+    def get(self, reader: pa.RecordBatchFileReader, index: int, drop_tokens: Set):
+        doc = reader.get_batch(index)[self.col_name]
+        if len(doc) > 0 and doc[0].as_py() in drop_tokens:
+            doc = doc.slice(1, len(doc) - 1)
+        # Recheck len for edge case where doc=[eos]
+        if len(doc) > 0 and doc[-1].as_py() in drop_tokens:
+            doc = doc.slice(0, len(doc) - 1)
+        return doc
+
+    def slice(self, doc: pa.UInt32Array, index: int, n_pull: int) -> List:
+        return doc.slice(index, n_pull).to_pylist()
