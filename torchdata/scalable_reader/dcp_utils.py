@@ -18,13 +18,14 @@ from ..stateful_dataloader.stateful_dataloader import StatefulDataLoader
 
 """
 The following saving/loading functions use PyTorch DCP to handle distributed transfer of dataloader
-state dict objects to and from disk. Implements specified scaling behavior for the four tag types,
-depending on whether or not rescaling is being performed at load time:
+state dict objects to and from disk. Implements specified scaling behavior for the four tag types
+of ScalableReader and _NestedStatefulDatasets, depending on whether or not rescaling is being performed 
+at load time:
 
 1. State: State variables are wrapped in DTensors and saved via DCP. At load time, values are loaded
 back only when not rescaling. If rescaling, the checkpoint values are ignored. Some additional metadata
 saved under this category, including: 1) the state_dict of the torchdata DataLoader itself, and 2) the
-sizes of the reshard variables across each rank's individual worker threads.
+sizes of the reshard variables across each rank's individual worker processes.
 2. Broadcast: Broadcast variables are saved from rank 0 only as generic state dict entries. At load
 time, these values are loaded back and replicated to each rank and worker.
 3. Reshard: Reshard variables are wrapped in DTensors, sharding on dim 0, with added support for 
@@ -34,7 +35,7 @@ and resharded on dim 0 as evenly as possible across ranks, then workers.
 4. Custom: Custom variables are saved as generic state dict entries, with global rank prepended to
 keys to prevent dict collisions. When loading without rescaling, only the entry from the same rank
 is loaded back. When rescaling, all ranks' worth of entries are loaded, and passed into the Dataset
-as a dict of lists of values. The _StatefulDataset.custom_fns are then used to perform custom 
+as a state dict of lists of values. The _StatefulDataset.custom_fns are then used to perform custom 
 resharding as specified, during _StatefulDataset.load_state_dict().
 
 This approach imposes the following restrictions on checkpoint format:

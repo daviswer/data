@@ -8,15 +8,33 @@ from .base_loader import _StatefulDataset
 
 
 """
-TODO: blurb
-"""
+Implements additional layers of functionality for data loading pipelines built on ScalableReader. 
 
+Additional layers are implemented as wrappers for existing pipelines, adding another stage of
+preprocessing for each layer (i.e. shuffling, subdataset sampling, etc). Wrappers extend
+_StatefulDataset and are compatible with the tagged-state checkpointing framework.
+
+Example usage is as follows:
+  data = ScalableReader(path, rank, worldsize, filehandler, delimiter)
+  data = SamplingDataset(path, data, delimiter, datasets, weights)
+  data = DocPackingDataset(data, seq_len, n_pads, delimiter, pad)
+  data = ShuffleDataset(data, buffer_size)
+  data = PreProcessDataset(data, lambda x: torch.tensor(x))
+  loader = StatefulDataLoader(data, batch_size=1, num_workers=1)
+
+This pipeline loads documents from the specified path, pulling from individual subdatasets according
+to specified token ratios, packs and slices the documents into training sequences of length seq_len,
+maintains a buffer of buffer_size sequences to perform local shuffling, and finally converts each 
+data sequence to a torch tensor. It also supports rescalable checkpoint saving and loading.
+"""
 
 class _NestedStatefulDataset(_StatefulDataset):
     """
     Stub for nested wrappers of _StatefulDatasets. Extends state fns with recursion.
     Requires a single instantiated sub-dataset (which may be replicated during setup fn).
     The resulting self.dataset must either be a _StatefulDataset, or iterable of _StatefulDatasets.
+    If sub-dataset emits a state dict with tag-subdicts that are flat, tag-subdicts for this layer will
+    also be flat (ensuring these can be used with the DCP saving/loading functions in dcp_utils.py).
     """
 
     def __init__(
@@ -46,7 +64,7 @@ class _NestedStatefulDataset(_StatefulDataset):
     def load_state_dict(self, state_dict):
         """
         Sets all specified flags at the current level, then recurses into wrapped dataset.
-        If multiple subdatasets are present, uses corresponding key prefixes.
+        If multiple subdatasets are present, uses corresponding key prefixes to retrieve subdicts.
         """
         self.setup()
         super().load_state_dict(state_dict)
@@ -59,11 +77,6 @@ class _NestedStatefulDataset(_StatefulDataset):
                                        for k,v in state_dict[state_type].items()
                                        if prefix in k} 
                            for state_type in state_dict}
-                # for state_type in state_dict:
-                #     for k,v in state_dict[state_type].items():
-                #         if prefix in k:
-                #             print(".   ", k[len(prefix):])
-                # print(prefix, subdict, state_dict)
                 subdata.load_state_dict(subdict)
 
     def state_dict(self):
@@ -123,16 +136,16 @@ class ShuffleDataset(_NestedStatefulDataset):
     Passes randomly sampled outputs one by one.
     Ensures local mixing of data without relying on sliding windows or shuffling of large buffers.
     Any two consecutive inputs will be separated by window_size steps in expectation.
-    Rescaling-enabled: buffers that shrink will re-grow to window_size,
-    buffers that expand will shrink back down to window_size.
-    Sequences retrieved from the wrapped StatefulDataset must all be the same length.
+    Rescaling-enabled: buffers that shrink will re-grow to window_size over time, while buffers that 
+    expand will shrink back down to window_size over time.
+    Sequences pulled from the wrapped StatefulDataset must all be constant length.
     ...
     Args
     ----
     dataset : _StatefulDataset
         Fully instantiated dataset
     window_size : int
-        Max size of input/output buffer
+        Target size of input/output buffer
     """
 
     def __init__(self, dataset: _StatefulDataset, window_size: int):
@@ -164,23 +177,21 @@ class ShuffleDataset(_NestedStatefulDataset):
             self.buffer = []
             self.buffer_size = 0
             self._pad_buffer()
-
         while True:
             # If buffer is undersized, add a datapoint
             if self.buffer_size < self.window_size:
                 self.buffer[self.buffer_size] = first_draw if first_draw is not None else next(dataset)
                 first_draw = None
                 self.buffer_size += 1
-
             # Swap out randomly sampled value from buffer.
-            # If buffer is small, add new item.
-            # If buffer is large, pop last item into that slot.
             i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
             out = self.buffer[i]
             if self.buffer_size > self.window_size:
+                # If buffer is large, pop last item into the freed slot.
                 self.buffer[i] = self.buffer[self.buffer_size - 1]
                 self.buffer_size -= 1
             else:
+                # If buffer is small, add new item into the freed slot.
                 self.buffer[i] = first_draw if first_draw is not None else next(dataset)
                 first_draw = None
             yield out
@@ -223,6 +234,27 @@ class DocPackingDataset(_NestedStatefulDataset):
     When the number of right-padding tokens in a buffer falls below the specified threshold, that buffer
     is passed as the next sequence output. Number of buffers is set roughly to n_bins, but may rise/fall
     as documents and fragments are added/flushed. Buffers are redistributed over workers when rescaling.
+    
+    NB: currently assumes that sequences are numerical, and do not contain the value -100. This can be
+    changed in future if it causes problems.
+    ...
+    Args
+    ----
+    dataset : _StatefulDataset
+        Fully instantiated dataset
+    seq_len : int
+        Length of emitted training sequences
+    n_pads : int
+        The maximum number of right-pads allowed in a training sequence
+    delimiter_token : Any
+        The value that indicates the end of a document when it occurs at the end of any of the 
+        subdataset's emitted chunks
+    pad_token : Any
+        The value to use as a padding token. Data type should match the underlying data sequences 
+        being processed.
+    n_bins : int
+        The target number of buffers to maintain that are filled by incoming data chunks. Higher values
+        will result in less padding, but with diminishing returns and increasing overhead.
     """
     def __init__(
             self,
@@ -248,11 +280,13 @@ class DocPackingDataset(_NestedStatefulDataset):
             self.dummy -= 1
 
     def _available_bins(self, targ):
+        # Find the bins with enough space to accomodate a chunk of target length
         slack = torch.tensor(self.bins).eq(self.dummy).flip(dims=(1,)).cumprod(dim=1).sum(dim=1)
         n_available = slack.ge(targ).int().sum().item()
         return n_available, slack
     
     def _bin_insert(self, slack, doc):
+        # Insert given doc into the fullest bin that can accommodate it
         slack_after = slack.sub(len(doc))
         slack_after += slack_after.sign().clamp(min=-1,max=0).neg().mul(1e12).long()
         best_bin = slack_after.argmin().item()
@@ -265,7 +299,6 @@ class DocPackingDataset(_NestedStatefulDataset):
         # If seq len doesn't match current bucket size, dump current buckets
         if len(self.bins) == 0 or len(self.bins[0]) != self.len:
             self.bins = [[self.dummy]*self.len]
-        
         while True:
             # Flush any sufficiently full buckets
             n_underfull,slack = self._available_bins(self.npads+1)
@@ -349,13 +382,15 @@ class SamplingDataset(_NestedStatefulDataset):
     ----
     datapath : str
         Absolute path to the dataset directory. Expects directory to contain subfolders,
-        which in turn contain shard files.
+        which in turn contain shard files. Overrides path attribute of instantiated dataset arg.
     dataset : _StatefulDataset
         Fully instantiated dataset. Cloned across desired subdatasets during setup.
     delimiter_token : Any
-        Token used to indicate sequence/document breaks. Type should match data type.
+        The value that indicates the end of a document when it occurs at the end of any of the 
+        subdatasets' emitted chunks
     datasets : list[str] | None
-        A list of subdatasets to draw from. If None, draws from all subfolders of datapath.
+        A list of subfolders to draw from. If None, draws from all non-nested subfolders of datapath.
+        Supports relative paths in case of nested subfolders.
     weights : list(float) | None
         Weights describing what percent of emitted tokens should come from each subdataset.
         Need not sum to 1. If None, tokens are drawn evenly.
@@ -390,7 +425,6 @@ class SamplingDataset(_NestedStatefulDataset):
             assert os.path.exists(
                 os.path.join(datapath, d)
             ), f"Invalid subdataset path: {os.path.join(datapath, d)}"
-
         if weights is not None:
             assert len(weights) == len(
                 self.datasets
@@ -401,7 +435,6 @@ class SamplingDataset(_NestedStatefulDataset):
         self.weights = [w / sum(self.weights) for w in self.weights]
 
         self.tokens_seen = [0] * len(self.datasets)
-
         self.current_iterator = -1
         self.state_vars = ["tokens_seen", "current_iterator"]
 
@@ -436,8 +469,8 @@ class SamplingDataset(_NestedStatefulDataset):
                     self.current_iterator = -1
                 yield out
             else:
-                # Choose new subdataset to draw from
-                # (whichever is currently most underrepresented compared to target rate)
+                # Choose new subdataset to draw from (whichever is currently most underrepresented
+                # compared to target ratios)
                 offset = [
                     self.tokens_seen[i]
                     - self.weights[i] * sum(self.tokens_seen)

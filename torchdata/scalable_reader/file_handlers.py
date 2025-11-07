@@ -1,11 +1,14 @@
 import os
 import pyarrow as pa
 from abc import ABCMeta, abstractmethod
+from pyarrow import parquet as pq
+from transformers import AutoTokenizer
 from typing import List, Set
 
 
 """
-TODO: blurb
+FileHandlers implement basic file operations such as file type checking, opening, indexing, and slicing. 
+By implementing these basic operations, users can add support for arbitrary file types to ScalableReader.
 """
 
 
@@ -73,8 +76,8 @@ class ArrowHandler(ShardFileHandler):
     Non-standard data format, though.
     """
 
-    def __init__(self, col_name: str = "tokens"):
-        self.col_name = col_name
+    def __init__(self, col_names: List[str] = ["text", "contents", "tokens"]):
+        self.col_names = col_names
 
     def is_legal(self, filepath: str):
         return "arrow" in os.path.splitext(filepath)[1]
@@ -86,7 +89,18 @@ class ArrowHandler(ShardFileHandler):
         return self.open(path).num_record_batches
 
     def get(self, reader: pa.RecordBatchFileReader, index: int, drop_tokens: Set):
-        doc = reader.get_batch(index)[self.col_name]
+        assert (
+            index < reader.num_record_batches
+        ), f"Illegal index {index} in set of {reader.num_record_batches} documents"
+        frame = reader.get_batch(index)
+        doc = None
+        for name in self.col_names:
+            if name in frame.column_names:
+                doc = frame[name]
+                break
+        assert (
+            doc is not None
+        ), f"None of column names {self.col_names} found in file headers {frame.column_names}"
         if len(doc) > 0 and doc[0].as_py() in drop_tokens:
             doc = doc.slice(1, len(doc) - 1)
         # Recheck len for edge case where doc=[eos]
@@ -96,3 +110,58 @@ class ArrowHandler(ShardFileHandler):
 
     def slice(self, doc: pa.UInt32Array, index: int, n_pull: int) -> List:
         return doc.slice(index, n_pull).to_pylist()
+
+
+class ParquetHandler(ShardFileHandler):
+    """
+    Reader for indexable parquet shard files, common in HF datasets.
+    Here we assume reasonably small shard files (<5Gb) and truncate docs to max_doclen characters,
+    as we rely on parquet/pandas for efficient file reading, and tokenize entire documents
+    before getting/slicing. However, this is a standard and widely-used data format.
+    """
+
+    def __init__(
+        self,
+        tokenizer_path: str,
+        col_names: List[str] = ["text", "contents", "tokens"],
+        max_doclen: int = 1_000_000,
+    ):
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        self.col_names = col_names
+        self.max_doclen = max_doclen
+
+    def is_legal(self, filepath: str):
+        return "parquet" in os.path.splitext(filepath)[1]
+
+    def open(self, path: str):
+        names = pq.read_schema(path).names
+        match = None
+        for name in self.col_names:
+            if name in names:
+                match = name
+                break
+        assert (
+            match is not None
+        ), f"None of column names {self.col_names} found in file headers {names}"
+        return pq.read_pandas(path, columns=[match], partitioning=None)[match]
+
+    def length(self, path: str):
+        try:
+            return pq.read_metadata(path).num_rows
+        except:
+            print("Offending path:", path)
+
+    def get(self, reader, index: int, drop_tokens: Set):
+        assert (
+            index < reader.length()
+        ), f"Illegal index {index} in set of {reader.length()} documents"
+        doc = self.tokenizer(str(reader[index])[: self.max_doclen])["input_ids"]
+        if len(doc) > 0 and doc[0] in drop_tokens:
+            doc = doc[1:]
+        # Recheck len for edge case where doc=[eos]
+        if len(doc) > 0 and doc[-1] in drop_tokens:
+            doc = doc[:-1]
+        return doc
+
+    def slice(self, doc: List, index: int, n_pull: int) -> List:
+        return doc[index : index + n_pull]

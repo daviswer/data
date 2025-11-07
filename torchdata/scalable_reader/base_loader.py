@@ -10,27 +10,20 @@ from .file_handlers import ShardFileHandler
 
 
 """
-This file borrows the StatefulDataset framework from the IBM fms-fsdp repo to implement rescalable data
-loading. This framework is analogous to the existing torchdata nodes framework and will likely be 
-converted in the future.
-
-Rescalability is implemented at the base level - you must use this layer to interface with a collection
-of indexable files directly. The ScalableReader then yields data values like an iterator. These values
-are not shuffled. 
-
-ScalableReader interfaces with indexable files via custom FileHandlers. These FileHandlers implement basic
-file operations such as file type checking, opening, indexing, and slicing. By implementing these basic
-operations, users can add support for arbitrary file types.
+Implements rescalable dataloading, via a base class stub and a shard-based implementation for
+interfacing with a collection of indexable data files. The ScalableReader yields data values
+like an iterator, and does not perform shuffling. ScalableReader interfaces with indexable files
+via custom FileHandlers from file_handlers.py.
 
 Rescalability is implemented by splitting data into a large number of logical shards, which are then
 allocated over the set of dataloader workers. We assume that logical shards vastly outnumber workers,
 such that when workers do not divide logical shards evenly, the off-by-one allocations don't matter and
 workers still finish their epochs at roughly the same time. Files are assigned to logical shards
-fractionally and based on file size, such that each shard contains roughly equal amounts of data, and as
-few individual files as possible. This minimizes the number of file pulls. 
+fractionally and based on file size, such that each shard contains roughly equal amounts of data, and 
+as few individual files as possible. This minimizes the number of file pulls. 
 
-ScalableReaders step through a single active logical shard at a time, to minimize overhead. This behavior
-can be relaxed later.
+ScalableReaders step through a single active logical shard at a time, to minimize overhead. 
+This behavior can be relaxed later.
 
 When rescaling to a different number of workers, the logical shard progress counters are aggregated
 globally onto each ScalableReader. Then, completed and incomplete logical shards are re-allocated
@@ -38,16 +31,16 @@ separately, to ensure that each worker receives roughly the same ratio of seen t
 current epoch. This allows us to scale from any number of workers to any other number.
 
 State dict saving and loading behavior is governed by tagging the relevant class variables as one of 4
-options: 1) state (scalar values dropped when rescaling), 2) broadcast (saved values identical across all 
-workers), 3) reshard (tensors that are repartitioned on dim 0 when rescaling), and 4) custom (paired with 
-a user-provided resharding function, for when more sophisticated behavior is required). The base 
-_StatefulDataset stub illustrates usage. 
+options: 1) state (scalar values dropped when rescaling), 2) broadcast (saved values identical across 
+all workers), 3) reshard (tensors that are repartitioned on dim 0 when rescaling), and 4) custom 
+(paired with a user-provided resharding function, for when more sophisticated behavior is required). 
+The base _StatefulDataset stub illustrates usage. 
 
-Differently tagged state values are saved under separate state sub-dictionaries. A separate saving/loading
-framework is required for aggregating state dicts from workers and saving/loading to disk. We leverage
-PyTorch Distributed Checkpointing (DCP) to implement saving, loading, and rescaling distributed checkpoints.
-A simplified, asynchronous (but also much less efficient) implementation is provided in the unit testing 
-script for validation and illustration purposes.
+Differently tagged state values are saved under separate state sub-dictionaries. A separate 
+saving/loading framework is required for aggregating state dicts from workers and saving/loading to 
+disk. We leverage PyTorch Distributed Checkpointing (DCP) to implement saving, loading, and rescaling 
+distributed checkpoints in dcp_utils.py. A simplified, asynchronous (but also much less efficient) 
+implementation is provided in the unit testing script for validation and illustration purposes.
 """
 
 
@@ -156,16 +149,62 @@ class _StatefulDataset(data.IterableDataset):
                 self.custom_fns[i](getattr(self, self.custom_vars[i]))
             ) for i in range(len(self.custom_vars))]
 
+    def __iter__(self):
+        raise NotImplementedError
+
 
 class ScalableReader(_StatefulDataset):
     """
-    Maintains n x 5 state buffer where n is the number of logical shards owned by this worker,
-    and 5 is the number of relevant data fields per-shard. Finishes shards with the lowest
-    visit count before continuing into new epoch. When rescaling, re-allocates visited / unvisited
-    shards in the current epoch separately, so that each new worker finishes the epoch at around
+    Iterates through a shard of all data in the specified datapath, as determined by rank and worldsize.
+    Implements rescalability by dividing data into a large number of logical shards, and allocating
+    logical shards over physical dataloader workers. During iteration, shards with the lowest visit 
+    count are exhausted before continuing into new a epoch. When rescaling, re-allocates logical shards 
+    to achieve as even data coverage as possible, so that each new worker finishes its epoch at around
     the same time.
 
+    Local state is an n x 5 matrix where n is the number of logical shards owned by this worker, and 5
+    is the number of relevant data fields per-shard. The 5 fields are: shard index, file index,
+    document index, document chunk index, and visitation/epoch count. This information, aggregated
+    across workers, is sufficient to track the entirety of seen and unseen data in the dataset.
+
     Currently does not shuffle docs within shards/files, but this can be added later.
+    ...
+    Args
+    ----
+    datapath : str
+        Absolute path to a directory containing data files. Directory need not be flat: all files under
+        the current path will be detected so long as they are determined valid by the filehandler.
+    rank : int
+        Rank of the current device w.r.t. data parallelism.
+    worldsize : int
+        Total number of devices w.r.t. data parallelism.
+    filehandler : file_handlers.ShardFileHandler
+        A FileHandler used to detect and interface with the data files in the datapath.
+    delimiter_token : Any
+        A token inserted at the end of each retrieved sequence/document. Indicates end of document
+        for subsequent wrappers / loader stages (i.e. packing/slicing, shuffling, subdataset sampling).
+        If not needed, can be removed in subsequent stages instead. Data type should match the 
+        underlying data sequences being loaded.
+    bos_token : Any
+        An optional token inserted at the beginning of each retrieved sequence/document. Data type
+        should match the underlying data sequences being loaded. Note that specifying this and 
+        delimiter_token will result in paired delimiters when documents are packed together, 
+        i.e. <doc> <delimiter> <bos> <doc>
+    strip_tokens : Set[Any]
+        A set of values to be removed from loaded sequences/documents, if they occur in the first or
+        last position. Used to remove any existing bos/eos/delimiter tokens before inserting the
+        specified bos/delimiter above.
+    min_length : int
+        Any loaded sequences/documents shorter than this value will be skipped.
+    max_chunksize : int
+        If a loaded sequence/document is longer than this value, it will instead be partitioned into
+        chunks of this size or smaller (not counting added bos/delimiter tokens), which are emitted 
+        in order. For pyarrow data file formats, this prevents extra overhead when loading an extremely 
+        long sequence/document.
+    n_logical_shards : int
+        The number of logical data partitions. This value should be much larger than the number of
+        dataloader workers, and also much smaller than the number of sequences/documents in the dataset.
+        This ensures that workers exhaust their data and finish their epochs at roughly the same time.
     """
 
     def __init__(
@@ -177,14 +216,11 @@ class ScalableReader(_StatefulDataset):
         delimiter_token: Any,
         bos_token: Optional[Any] = None,
         strip_tokens: Optional[Set[Any]] = set(),
-        seed: int = 42,
         min_length: int = 1,
         max_chunksize: int = 1024,
         n_logical_shards: int = 30720,
-        verbose: bool = False,
     ):
         super().__init__(datapath, rank, worldsize)
-        self.seed = seed  # Currently unused
         self.datapath = datapath
         self.filehandler = filehandler()
         self.min_length = min_length  # Ignore any docs shorter than this
@@ -194,7 +230,6 @@ class ScalableReader(_StatefulDataset):
         self.bos = bos_token  # Inserted before each doc (optional)
         self.drop = strip_tokens  # Tokens to drop from begin/end of doc (replaced by above delimiter/bos)
         self.n_logical_shards = n_logical_shards
-        self.verbose = verbose  # Currently unused
         
         # Position
         self.reader = None
@@ -211,7 +246,9 @@ class ScalableReader(_StatefulDataset):
 
     def _get_shard_breakdown(self, rank, nshards):
         """
-        Retrieve the set of (fractional) files assigned to a given logical shard
+        Retrieve the set of (fractional) files assigned to a given logical shard. Returns a list of
+        data files, indicating for each file: the file index, and the start and end points, expressed
+        as percentage points of the entire file. 
         """
         # Find first doc included in the current shard
         sizelist = torch.tensor(self.filesizes[1])
@@ -256,7 +293,7 @@ class ScalableReader(_StatefulDataset):
 
             # Set up logical shard states (may be overwritten later by ckp load)
             self.shard_states = torch.zeros(math.ceil(self.n_logical_shards / self.worldsize), 5, dtype=torch.int)
-            self.shard_states[:len(my_shards), 0] = torch.tensor(my_shards)
+            self.shard_states[:len(my_shards), 0] = torch.tensor(my_shards)  # Set shard ids
 
             # Pad shard state if this worker is off by one. Id is -1 and visit count is inf.
             self.shard_states[len(my_shards):, 0] = -1
@@ -264,8 +301,9 @@ class ScalableReader(_StatefulDataset):
 
     def _pre_iter(self):
         """
-        Construct index of data files and their filesizes. 
-        This is saved/loaded in subsequent checkpoints to avoid re-indexing the entire dataset repeatedly.
+        Construct index of data files and their filesizes. This is saved/loaded in subsequent
+        checkpoints to avoid re-indexing the entire dataset repeatedly (and so deferred from
+        self.setup to ensure that this only runs AFTER loading a given checkpoint).
         """
         # Assemble set of available shard files, if nonexistant
         if self.filesizes is None:
@@ -312,23 +350,24 @@ class ScalableReader(_StatefulDataset):
         return chunk
     
     def __iter__(self):
-        if not self.is_setup:
-            self.setup()
+        self.setup()
         self._pre_iter()
         reader = None
         ndocs = -1
         has_yielded = False
         assert len(self.shard_states) > 0 and self.shard_states[:,0].sign().add(1).sign().sum() > 0, f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no logical shards!"
         while True:
-            # Isolate undervisited shards
+            # Isolate undervisited shards using epoch count field of shard_states
             epoch_count = self.shard_states[:,4].min().item()
             shardset = self.shard_states[:,4].eq(epoch_count).nonzero().squeeze(-1)
             for j,k in enumerate(shardset):
-                # Account for shard_state reordering occuring at end of each loop iter
+                # Account for the relocation of each active shard_state 
+                # to the end of self.shard_states after it is exhausted
                 i = k-j
                 shardid = self.shard_states[i][0].item()
                 files = self._get_shard_breakdown(shardid, self.n_logical_shards)  # list([docid, start%, end%])
                 file_offset = self.shard_states[i][1].item()
+                # For each shard, iterate over the contained data files, starting from any specified offset
                 for file_pos in range(file_offset, len(files)):
                     # Update position
                     self.shard_states[i][1] = file_pos
@@ -339,6 +378,7 @@ class ScalableReader(_StatefulDataset):
                     doc_start = round(ndocs * file[1])
                     doc_end = round(ndocs * file[2])
                     doc_offset = self.shard_states[i][2].item()
+                    # For each file, iterate over the specified range of contained sequences/documents
                     for doc_pos in range(doc_offset, doc_end - doc_start):
                         # Update position
                         self.shard_states[i][2] = doc_pos
@@ -347,6 +387,7 @@ class ScalableReader(_StatefulDataset):
                         doclen = len(doc)
                         nchunks = math.ceil(doclen/self.chunksize)
                         chunk_offset = self.shard_states[i][3].item()
+                        # For each sequence/document, iterate over the chunks to emit
                         for chunk_pos in range(chunk_offset, nchunks):
                             # Update position
                             self.shard_states[i][3] = chunk_pos+1
@@ -374,9 +415,13 @@ class ScalableReader(_StatefulDataset):
     
     def shard_rescale(self, shard_states: List[torch.Tensor]):
         """
-        Custom function for rescaling of ScalableReader.shard_states
+        Custom function for rescaling of ScalableReader.shard_states. Logical shards, aggregated across
+        workers, are divided based on whether or not they have been visited in the current epoch, 
+        and each partition is re-allocated across the new worker set such that each new worker
+        receives the same number of visited, unvisited, and total shards (at most off by one).
         """
         if len(shard_states) == self.worldsize:
+            # If not rescaling, just pull out the prior state for this worker
             return shard_states[self.rank]
         else:
             # Sort shards by epoch count, then id
@@ -412,7 +457,7 @@ class ScalableReader(_StatefulDataset):
             # Reverse sort incomplete shards by length
             # Minimizes padding by overallocating incomplete shards to underallocated complete shards
             incomplete_shards.sort(key=len, reverse=True)
-            
+
             # Pull out shard allocation for this worker
             # (sort/reverse-sort ensures allocations are off by no more than 1)
             shards = [
