@@ -2,7 +2,8 @@ import os
 import pyarrow as pa
 from abc import ABCMeta, abstractmethod
 from pyarrow import parquet as pq
-from transformers import AutoTokenizer
+# from transformers import AutoTokenizer
+from tokenizers import Tokenizer
 from typing import List, Set
 
 
@@ -122,11 +123,12 @@ class ParquetHandler(ShardFileHandler):
 
     def __init__(
         self,
-        tokenizer_path: str,
+        tokenizer: Tokenizer,
         col_names: List[str] = ["text", "contents", "tokens"],
         max_doclen: int = 1_000_000,
     ):
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        # self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        self.tokenizer = tokenizer
         self.col_names = col_names
         self.max_doclen = max_doclen
 
