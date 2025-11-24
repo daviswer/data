@@ -236,7 +236,7 @@ def pipeline(
         path, 
         rank, 
         worldsize, 
-        ArrowHandler, 
+        ArrowHandler(), 
         delimiter, 
         None, 
         seed=seed, 
