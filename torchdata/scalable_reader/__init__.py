@@ -6,7 +6,7 @@
 
 from .base_loader import ScalableReader
 from .wrappers import PreprocessDataset,ShuffleDataset,DocPackingDataset,SamplingDataset
-from .file_handlers import ShardFileHandler, ArrowHandler
+from .file_handlers import ShardFileHandler, ArrowHandler, ParquetHandler
 from .dcp_utils import save_ckpt_dcp, load_ckpt_dcp
 
 __all__ = [
