@@ -17,6 +17,7 @@ __all__ = [
     "SamplingDataset",
     "ShardFileHandler",
     "ArrowHandler",
+    "ParquetHandler",
     "save_ckpt_dcp",
     "load_ckpt_dcp",
 ]
