@@ -222,7 +222,7 @@ class ScalableReader(_StatefulDataset):
     ):
         super().__init__(datapath, rank, worldsize)
         self.datapath = datapath
-        self.filehandler = filehandler()
+        self.filehandler = filehandler
         self.min_length = min_length  # Ignore any docs shorter than this
         assert max_chunksize > 0, f"Max chunksize must be a nonzero positive integer"
         self.chunksize = max_chunksize  # Yield chunks at a time if doc is longer than this
