@@ -157,7 +157,7 @@ class ParquetHandler(ShardFileHandler):
         assert (
             index < reader.length()
         ), f"Illegal index {index} in set of {reader.length()} documents"
-        doc = self.tokenizer.encode(str(reader[index])[: self.max_doclen])["input_ids"]
+        doc = self.tokenizer.encode(str(reader[index])[: self.max_doclen])
         if len(doc) > 0 and doc[0] in drop_tokens:
             doc = doc[1:]
         # Recheck len for edge case where doc=[eos]
