@@ -113,7 +113,7 @@ def save_ckpt_dcp(
         size = torch.tensor(x.size(0), dtype=torch.long)[None]
         sizes = torch.empty(worldsize, dtype=torch.long)
         dist.all_gather_into_tensor(sizes, size)
-        offsets = sizes.roll(1, 0)
+        offsets = sizes.cumsum(0).roll(1, 0)
         offsets[0] = 0
         time.sleep(rank/5)
         print(".   ", sizes, offsets)
