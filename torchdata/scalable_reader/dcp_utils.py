@@ -1,5 +1,6 @@
 import functools
 import os
+import time
 from copy import deepcopy
 from typing import cast, Optional, Union
 
@@ -112,6 +113,8 @@ def save_ckpt_dcp(
         size = torch.tensor(x.size(0), dtype=torch.long)[None]
         sizes = torch.empty(worldsize, dtype=torch.long)
         dist.all_gather_into_tensor(sizes, size)
+        time.sleep(rank)
+        print(".   ", sizes)
         offsets = sizes.cumsum(0) - sizes[0]
         global_shape = [sizes.sum()] + list(x.shape[1:])
         x = LocalShardsWrapper(
