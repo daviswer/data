@@ -115,7 +115,8 @@ def save_ckpt_dcp(
         dist.all_gather_into_tensor(sizes, size)
         time.sleep(rank)
         print(".   ", sizes)
-        offsets = sizes.cumsum(0) - sizes[0]
+        offsets = sizes.roll(1, 0)
+        offsets[0] = 0
         global_shape = [sizes.sum()] + list(x.shape[1:])
         x = LocalShardsWrapper(
             local_shards=[x], local_offsets=[(offsets[rank], 0)]
