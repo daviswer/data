@@ -73,8 +73,6 @@ def save_ckpt_dcp(
     rank = loader.dataset.rank
     worldsize = loader.dataset.worldsize
     state = deepcopy(loader.state_dict())
-    print(".   ", state.keys())
-    print(state)
     nworkers = state["_snapshot"]["_main_snapshot"]["_num_workers"]
     dstate = state["_snapshot"]["_worker_snapshots"]
     dstate = [dstate[f"worker_{i}"].pop("dataset_state") for i in range(len(dstate))]  # List[dict]
