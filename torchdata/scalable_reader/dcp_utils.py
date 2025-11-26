@@ -271,21 +271,37 @@ def load_ckpt_dcp(
     if easy_load:
         # Load back individual mismatched shards by reconstructing LocalShardsWrappers 
         # from corresponding ChunkMetadata
-        reshard_vars = {
-            k: dtensor.DTensor.from_local(
+        reshard_vars = {}
+        for k,v in meta['reshard'].items():
+            print(k, v.size)
+            reshard_vars[k] = dtensor.DTensor.from_local(
                 local_tensor = LocalShardsWrapper(
-                    local_shards=[torch.empty(
-                        v.chunks[r].sizes, 
-                        dtype=v.properties.dtype,
-                    )], 
-                    local_offsets=[v.chunks[r].offsets]
-                ),
-                device_mesh = device_mesh,
-                placements = [dtensor.placement_types.Shard(0)],
-                shape = v.size,
-                stride = [1] * len(v.size),
-            ) for k,v in meta['reshard'].items()
-        }
+                local_shards=[torch.empty(
+                    v.chunks[r].sizes, 
+                    dtype=v.properties.dtype,
+                )], 
+                local_offsets=[v.chunks[r].offsets]
+            ),
+            device_mesh = device_mesh,
+            placements = [dtensor.placement_types.Shard(0)],
+            shape = v.size,
+            stride = [1] * len(v.size),
+            )
+        # reshard_vars = {
+        #     k: dtensor.DTensor.from_local(
+        #         local_tensor = LocalShardsWrapper(
+        #             local_shards=[torch.empty(
+        #                 v.chunks[r].sizes, 
+        #                 dtype=v.properties.dtype,
+        #             )], 
+        #             local_offsets=[v.chunks[r].offsets]
+        #         ),
+        #         device_mesh = device_mesh,
+        #         placements = [dtensor.placement_types.Shard(0)],
+        #         shape = v.size,
+        #         stride = [1] * len(v.size),
+        #     ) for k,v in meta['reshard'].items()
+        # }
         # Retrieve local worker splits from "state"
         local_split = reshard_sizes
     else:
