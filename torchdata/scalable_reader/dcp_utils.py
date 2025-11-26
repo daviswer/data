@@ -285,7 +285,7 @@ def load_ckpt_dcp(
             device_mesh = device_mesh,
             placements = [dtensor.placement_types.Shard(0)],
             shape = v.size,
-            stride = [1] * len(v.size),
+            stride = tuple([1] * len(v.size)),
             )
         # reshard_vars = {
         #     k: dtensor.DTensor.from_local(
