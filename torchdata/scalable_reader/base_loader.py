@@ -205,6 +205,8 @@ class ScalableReader(_StatefulDataset):
         The number of logical data partitions. This value should be much larger than the number of
         dataloader workers, and also much smaller than the number of sequences/documents in the dataset.
         This ensures that workers exhaust their data and finish their epochs at roughly the same time.
+    seed : int
+        Random seed used to shuffle logical shard assignments
     """
 
     def __init__(
@@ -219,6 +221,7 @@ class ScalableReader(_StatefulDataset):
         min_length: int = 1,
         max_chunksize: int = 1024,
         n_logical_shards: int = 30720,
+        seed: int = 42,
     ):
         super().__init__(datapath, rank, worldsize)
         self.datapath = datapath
@@ -230,6 +233,8 @@ class ScalableReader(_StatefulDataset):
         self.bos = bos_token  # Inserted before each doc (optional)
         self.drop = strip_tokens  # Tokens to drop from begin/end of doc (replaced by above delimiter/bos)
         self.n_logical_shards = n_logical_shards
+        self.seed = seed
+        self.shuffle = torch.randperm(n_logical_shards, generator=torch.Generator().manual_seed(seed))
         
         # Position
         self.reader = None
@@ -250,6 +255,8 @@ class ScalableReader(_StatefulDataset):
         data files, indicating for each file: the file index, and the start and end points, expressed
         as percentage points of the entire file. 
         """
+        # Map rank to underlying shuffled index
+        rank = self.shuffle[rank]
         # Find first doc included in the current shard
         sizelist = torch.tensor(self.filesizes[1])
         sizelist = sizelist/sizelist.float().sum()
@@ -285,11 +292,15 @@ class ScalableReader(_StatefulDataset):
             # Get your adjusted rank and worldsize
             super().setup()
 
-            # Get logical shard partitions
-            my_shards = list(range(
-                (self.n_logical_shards * self.rank) // self.worldsize,
-                (self.n_logical_shards * (self.rank + 1)) // self.worldsize,
-            ))
+            # Get logical shard partitions. Use round-robin allocation to facilitate
+            # order preservation during rescaling 
+            my_shards = [
+                (x*self.worldsize+self.rank)%self.n_logical_shards 
+                for x in range(
+                    self.n_logical_shards//self.worldsize 
+                    + int(self.rank < self.n_logical_shards % self.worldsize)
+                )
+            ]
 
             # Set up logical shard states (may be overwritten later by ckp load)
             self.shard_states = torch.zeros(math.ceil(self.n_logical_shards / self.worldsize), 5, dtype=torch.int)
@@ -438,22 +449,24 @@ class ScalableReader(_StatefulDataset):
             n_complete = sorted.eq(sorted[0]).sum()
             completed_shards = shard_states[:n_complete]
             incomplete_shards = shard_states[n_complete:]
-            # Allocate completed shards
-            completed_shards = [
-                completed_shards[
-                    round(i*len(completed_shards)/self.worldsize):
-                    round((i+1)*len(completed_shards)/self.worldsize)
-                ] for i in range(self.worldsize)
-            ]
+
+            # Re-allocate completed and incomplete shards round-robin, to loosely preserve ordering
+            def reallocate(shard_states):
+                return [
+                    shard_states[[
+                        (x*self.worldsize+r)%len(shard_states) 
+                        for x in range(
+                            len(shard_states)//self.worldsize 
+                            + int(r < len(shard_states) % self.worldsize)
+                        )
+                    ]] for r in range(self.worldsize)
+                ]
+            completed_shards = reallocate(completed_shards)
+            incomplete_shards = reallocate(incomplete_shards)
+            
             # Sort completed shards by length
             completed_shards.sort(key=len)
-            # Allocate incomplete shards
-            incomplete_shards = [
-                incomplete_shards[
-                    round(i*len(incomplete_shards)/self.worldsize):
-                    round((i+1)*len(incomplete_shards)/self.worldsize)
-                ] for i in range(self.worldsize)
-            ]
+            
             # Reverse sort incomplete shards by length
             # Minimizes padding by overallocating incomplete shards to underallocated complete shards
             incomplete_shards.sort(key=len, reverse=True)
@@ -465,9 +478,6 @@ class ScalableReader(_StatefulDataset):
                 incomplete_shards[self.rank]
             ]
             shard_states = torch.cat(shards)
-            # Order shards by global ID (for steady file progression)
-            _, indices = shard_states[:,0].sort()
-            shard_states[:len(shard_states)] = shard_states[indices]
             # Pad out with dummy shards if needed
             shard_states[len(shard_states):,0] = -1
             shard_states[len(shard_states):,4] = torch.iinfo(torch.int).max

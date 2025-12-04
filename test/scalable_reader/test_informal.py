@@ -8,7 +8,7 @@ import tempfile
 import torch
 
 from torchdata.stateful_dataloader import StatefulDataLoader
-from torchdata.scalable_reader.scalable_reader import (
+from torchdata.scalable_reader import (
     ScalableReader,
     PreprocessDataset,
     SamplingDataset,
@@ -277,7 +277,7 @@ def test_single_epoch():
     # For varying worldsizes, logical shard partitions, and chunk sizes,
     # ensure every data point is viewed at least once per epoch.
     # Also ensure that independent ranks do not share data.
-    size_set = (1,10,37,100,137)
+    size_set = (1,10,37,100,117)
     for n_logical in size_set:
         for worldsize in size_set:
             for chunksize in (100,50):

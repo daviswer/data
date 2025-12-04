@@ -146,9 +146,11 @@ class ShuffleDataset(_NestedStatefulDataset):
         Fully instantiated dataset
     window_size : int
         Target size of input/output buffer
+    seed : int
+        Random seed to use for shuffling
     """
 
-    def __init__(self, dataset: _StatefulDataset, window_size: int):
+    def __init__(self, dataset: _StatefulDataset, window_size: int, seed: int=42):
         super().__init__(dataset)
         assert (
             window_size > 1
@@ -160,10 +162,11 @@ class ShuffleDataset(_NestedStatefulDataset):
         self.buffer_size = 0
         self.state_vars = ["g_state"]
         self.reshard_vars = ["buffer"]
+        self.seed = seed
 
     def setup(self):
         if not self.is_setup:
-            self.generator = torch.Generator().manual_seed(self.rank)
+            self.generator = torch.Generator().manual_seed(self.rank + self.seed)
         super().setup()
 
     def __iter__(self):
