@@ -434,7 +434,7 @@ def test_shuffle_coverage():
 
     for seed in [0,1,7,42,777,2025]:
         for window in [100, 250, 777]:
-            data = ShuffleDataset(SteadyCounter(seed, 10), window)
+            data = ShuffleDataset(SteadyCounter(seed, 10), window, seed)
             loader = iter(data)
             out = set()
             for step in range(1000):
