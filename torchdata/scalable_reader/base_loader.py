@@ -256,7 +256,7 @@ class ScalableReader(_StatefulDataset):
         as percentage points of the entire file. 
         """
         # Map rank to underlying shuffled index
-        rank = self.shuffle[rank]
+        rank = self.shuffle[rank].item()
         # Find first doc included in the current shard
         sizelist = torch.tensor(self.filesizes[1])
         sizelist = sizelist/sizelist.float().sum()
