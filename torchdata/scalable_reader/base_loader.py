@@ -241,10 +241,6 @@ class ScalableHFReader(_StatefulDataset):
         d['examples_iterable']['examples_iterable']['shard_idx'] = shard_state[1].item()
         d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[2].item()
         reader.load_state_dict(d)
-
-        if self.rank==3 and "openstax" in self.datapath:
-            print(f"Worker {self.rank} opening new stream {rank} of {nshards}, state {shard_state}, reader {reader}")
-
         self.current_stream = reader
 
     def _process_doc(self, data):
@@ -295,12 +291,8 @@ class ScalableHFReader(_StatefulDataset):
                 l = 0
                 while True:
                     try:
-                        if self.rank==3 and "openstax" in self.datapath:
-                            print(f"Fetching doc {l}")
                         doc = next(reader)
                         seq = self._process_doc(doc)
-                        if self.rank==3 and "openstax" in self.datapath:
-                            print(f"Yielded doc of length {len(seq)}")
                         l += 1
                         yield seq
                     except StopIteration:
