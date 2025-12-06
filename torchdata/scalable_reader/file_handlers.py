@@ -68,9 +68,9 @@ class ArrowHandler(ShardFileHandler):
     """
     Reader for indexable, pre-tokenized PyArrow shard files.
     Pyarrow shard files are expected to hold multiple RecordBatches,
-    where each RecordBatch has a "tokens" field consisting of
-    a single token list (i.e. each document is a single sequence
-    under a "token" field, and the file is a list of such sequences).
+    where each RecordBatch has a field consisting of a single token list
+    (i.e. each document is a single sequence under a field in col_names, 
+    and the file is a list of such sequences).
 
     A preferred format as we can load document chunks without having to ever pull
     the entire document or shard file, allowing for graceful handling of large documents.

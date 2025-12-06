@@ -8,6 +8,9 @@ import torch.utils.data as data
 
 from .file_handlers import ShardFileHandler
 
+from datasets import load_dataset
+from datasets.distributed import split_dataset_by_node
+from tokenizers import Tokenizer
 
 """
 Implements rescalable dataloading, via a base class stub and a shard-based implementation for
@@ -43,6 +46,8 @@ distributed checkpoints in dcp_utils.py. A simplified, asynchronous (but also mu
 implementation is provided in the unit testing script for validation and illustration purposes.
 """
 
+# TODO: implement min_length
+
 
 class _StatefulDataset(data.IterableDataset):
     """
@@ -60,9 +65,6 @@ class _StatefulDataset(data.IterableDataset):
     ):
         assert rank >= 0, f"Rank {rank} must be a positive integer"
         assert worldsize > rank, f"Worldsize {worldsize} must be greater than rank {rank}"
-        assert datapath is None or (
-            os.path.isdir(datapath) and len(os.listdir(datapath)) > 0
-        ), f"Data path {datapath} must be a non-empty folder or None"
 
         # Default fields
         self.datapath = datapath
@@ -151,6 +153,176 @@ class _StatefulDataset(data.IterableDataset):
 
     def __iter__(self):
         raise NotImplementedError
+    
+
+class ScalableHFReader(_StatefulDataset):
+    """
+    TODO
+    """
+
+    def __init__(
+        self, 
+        datapath: str, 
+        rank: int, 
+        worldsize: int,
+        tokenizer: Tokenizer,
+        delimiter_token: Any,
+        bos_token: Optional[Any] = None,
+        strip_tokens: Optional[Set[Any]] = set(),
+        min_length: int = 1,
+        col_names: List[str] = ["text", "contents", "tokens"],
+        n_logical_shards: int = 30720,
+        seed: int = 42,
+    ):
+        super().__init__(datapath, rank, worldsize)
+        self.datapath = datapath
+        self.tokenizer = tokenizer
+        self.min_length = min_length  # Ignore any docs shorter than this
+        self.eos = delimiter_token  # Inserted between each doc
+        self.bos = bos_token  # Inserted before each doc (optional)
+        self.drop = strip_tokens  # Tokens to drop from begin/end of doc (replaced by above delimiter/bos)
+        self.col_names = col_names  # For each data point, grab first field that matches an entry in this list
+        self.n_logical_shards = n_logical_shards
+        self.seed = seed
+        self.shuffle = torch.randperm(n_logical_shards, generator=torch.Generator().manual_seed(seed))
+
+        # Setup flags
+        self.is_setup = False
+        self.stream = None
+        self.shard_states = None  # shardid, shard_idx, shard_example_idx, epoch   (reshardable state buffer)
+
+        # Position
+        self.current_shard = -1
+        self.current_stream = None
+
+        self.custom_vars = ["shard_states"]
+        self.custom_fns = [lambda shard_states: shard_rescale(shard_states, self.rank, self.worldsize)]
+
+    def setup(self):
+        """
+        Perform any rank- and path-dependent setup. This operation is deferred from __init__ 
+        to support multiple workers in the dataloader.
+        """
+        if not self.is_setup:
+            # Get your adjusted rank and worldsize
+            super().setup()
+
+            # Get logical shard partitions. Use round-robin allocation to facilitate
+            # order preservation during rescaling 
+            my_shards = [
+                (x*self.worldsize+self.rank)%self.n_logical_shards 
+                for x in range(
+                    self.n_logical_shards//self.worldsize 
+                    + int(self.rank < self.n_logical_shards % self.worldsize)
+                )
+            ]
+
+            # Set up logical shard states (may be overwritten later by ckp load)
+            self.shard_states = torch.zeros(math.ceil(self.n_logical_shards / self.worldsize), 4, dtype=torch.int)
+            self.shard_states[:len(my_shards), 0] = torch.tensor(my_shards)  # Set shard ids
+
+            # Pad shard state if this worker is off by one. Id is -1 and visit count is inf.
+            self.shard_states[len(my_shards):, 0] = -1
+            self.shard_states[len(my_shards):, 3] = torch.iinfo(torch.int).max
+
+            # Open HF stream
+            path, name = os.path.split(self.datapath)
+            self.stream = load_dataset(path, name=name, split="train", streaming=True)
+
+    def construct_reader(self, rank, nshards, shard_state):
+        """
+        TODO 
+        """
+        # Map rank to underlying shuffled index
+        rank = self.shuffle[rank].item()
+        # Fetch relevant HF data shard
+        reader = split_dataset_by_node(self.stream, rank, nshards)
+        d = reader.state_dict()
+        d['examples_iterable']['examples_iterable']['shard_idx'] = shard_state[1].item()
+        d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[2].item()
+        reader.load_state_dict(d)
+        self.current_stream = reader
+
+    def _process_doc(self, data):
+        """
+        Tokenize doc and handle bos/eos
+        """
+        # Pull out relevant text field
+        doc = None
+        for name in self.col_names:
+            if name in data.keys():
+                doc = data[name]
+                break
+        assert (
+            doc is not None
+        ), f"None of column names {self.col_names} found in file headers {data.keys()}"
+        # Tokenize
+        doc = self.tokenizer.encode(doc)
+        # Truncate first token if needed
+        if len(doc) > 0 and doc[0] in self.drop:
+            doc = doc[1:]
+        # Recheck len for edge case where doc=[eos]
+        if len(doc) > 0 and doc[-1] in self.drop:
+            doc = doc[:-1]
+        # Add bos/eos tokens
+        if self.bos is not None:
+            doc = [self.bos] + doc
+        doc = doc + [self.eos]
+        return doc
+    
+    def __iter__(self):
+        self.setup()
+        reader = None
+        has_yielded = False
+        assert len(self.shard_states) > 0 and self.shard_states[:,0].sign().add(1).sign().sum() > 0, f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no logical shards!"
+        while True:
+            # Isolate undervisited shards using epoch count field of shard_states
+            epoch_count = self.shard_states[:,3].min().item()
+            shardset = self.shard_states[:,3].eq(epoch_count).nonzero().squeeze(-1)
+            for j,k in enumerate(shardset):
+                # Account for the relocation of each active shard_state 
+                # to the end of self.shard_states after it is exhausted
+                i = k-j
+                shardid = self.shard_states[i][0].item()
+                self.construct_reader(shardid, self.n_logical_shards, self.shard_states[i])
+                reader = iter(self.current_stream)
+                # For each shard, iterate through all the remaining docs
+                self.current_shard = i
+                l = 0
+                while True:
+                    try:
+                        doc = next(reader)
+                        seq = self._process_doc(doc)
+                        l += 1
+                        yield seq
+                    except StopIteration:
+                        break
+                # When shard is complete, reset state and clear position tracker
+                self.shard_states[i][1] = 0
+                self.shard_states[i][2] = 0
+                # Increase epoch count after finishing shard
+                self.shard_states[i][3] += 1
+                # Prioritize unseen data after rescaling by shifting completed shard to end of shard_states
+                # i.e. shards with (id, epoch_count) [(0,0),(1,1),(2,1),(3,2)] wll produce order:
+                # 0,1,2,0,3,1,2,0,... instead of 0,0,1,2,0,1,2,3,...
+                self.shard_states = torch.cat([
+                    self.shard_states[:i],
+                    self.shard_states[i+1:],
+                    self.shard_states[i:i+1],
+                ], dim=0)
+            # Begin new epoch, and verify that after visiting all shards, some data has been produced
+            assert has_yielded or len(shardset)!=self.shard_states[:,0].sign().relu().sum().item(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
+
+    def state_dict(self):
+        # Write current reader's state into shard state
+        if self.current_shard != -1:
+            d = self.current_stream.state_dict()
+            self.shard_states[self.current_shard][1] = d['examples_iterable']['examples_iterable']['shard_idx']
+            self.shard_states[self.current_shard][2] = d['examples_iterable']['examples_iterable']['shard_example_idx']
+        return super().state_dict()
+    
+    def shard_rescale(self, shard_states: List[torch.Tensor]):
+        return shard_rescale(shard_states, self.rank, self.worldsize)
 
 
 class ScalableReader(_StatefulDataset):
@@ -224,6 +396,9 @@ class ScalableReader(_StatefulDataset):
         seed: int = 42,
     ):
         super().__init__(datapath, rank, worldsize)
+        assert datapath is None or (
+            os.path.isdir(datapath) and len(os.listdir(datapath)) > 0
+        ), f"Data path {datapath} must be a non-empty folder or None"
         self.datapath = datapath
         self.filehandler = filehandler
         self.min_length = min_length  # Ignore any docs shorter than this
@@ -247,7 +422,7 @@ class ScalableReader(_StatefulDataset):
 
         self.broadcast_vars = ["filesizes"]
         self.custom_vars = ["shard_states"]
-        self.custom_fns = [self.shard_rescale]
+        self.custom_fns = [lambda shard_states: shard_rescale(shard_states, self.rank, self.worldsize)]
 
     def _get_shard_breakdown(self, rank, nshards):
         """
@@ -291,6 +466,9 @@ class ScalableReader(_StatefulDataset):
         if not self.is_setup:
             # Get your adjusted rank and worldsize
             super().setup()
+
+            # Check that datapath, post setup, is still legal
+            assert os.path.isdir(self.datapath) and len(os.listdir(self.datapath)) > 0, f"Invalid dataset {self.datapath}"
 
             # Get logical shard partitions. Use round-robin allocation to facilitate
             # order preservation during rescaling 
@@ -423,62 +601,63 @@ class ScalableReader(_StatefulDataset):
                 ], dim=0)
             # Begin new epoch, and verify that after visiting all shards, some data has been produced
             assert has_yielded or len(shardset)!=self.shard_states[:,0].sign().relu().sum().item(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
+
     
-    def shard_rescale(self, shard_states: List[torch.Tensor]):
-        """
-        Custom function for rescaling of ScalableReader.shard_states. Logical shards, aggregated across
-        workers, are divided based on whether or not they have been visited in the current epoch, 
-        and each partition is re-allocated across the new worker set such that each new worker
-        receives the same number of visited, unvisited, and total shards (at most off by one).
-        """
-        if len(shard_states) == self.worldsize:
-            # If not rescaling, just pull out the prior state for this worker
-            return shard_states[self.rank]
-        else:
-            # Sort shards by epoch count, then id
-            shard_states = torch.cat(shard_states, dim=0)
-            _, indices = torch.sort(shard_states[:,0])
-            shard_states = shard_states[indices]
-            sorted, indices = torch.sort(shard_states[:,4], descending=True, stable=True)
-            shard_states = shard_states[indices]
-            # Strip out dummy padding shards
-            n_dummies = sorted.eq(torch.iinfo(torch.int).max).sum()
-            shard_states = shard_states[n_dummies:]  # n_logical 5
-            sorted = sorted[n_dummies:]
-            # Split into max and non-max epochs
-            n_complete = sorted.eq(sorted[0]).sum()
-            completed_shards = shard_states[:n_complete]
-            incomplete_shards = shard_states[n_complete:]
+def shard_rescale(shard_states: List[torch.Tensor], rank, worldsize):
+    """
+    Custom function for rescaling of ScalableReader / HFReader shard_states. Logical shards, 
+    aggregated across workers, are split based on whether they have been visited in the current 
+    epoch, and each partition is re-allocated across the new worker set such that each new worker
+    receives the same number of visited, unvisited, and total shards (at most off by one).
+    """
+    if len(shard_states) == worldsize:
+        # If not rescaling, just pull out the prior state for this worker
+        return shard_states[rank]
+    else:
+        # Sort shards by epoch count, then id
+        shard_states = torch.cat(shard_states, dim=0)
+        _, indices = torch.sort(shard_states[:,0])
+        shard_states = shard_states[indices]
+        sorted, indices = torch.sort(shard_states[:,-1], descending=True, stable=True)
+        shard_states = shard_states[indices]
+        # Strip out dummy padding shards
+        n_dummies = sorted.eq(torch.iinfo(torch.int).max).sum()
+        shard_states = shard_states[n_dummies:]  # n_logical x state_fields
+        sorted = sorted[n_dummies:]
+        # Split into max and non-max epochs
+        n_complete = sorted.eq(sorted[0]).sum()
+        completed_shards = shard_states[:n_complete]
+        incomplete_shards = shard_states[n_complete:]
 
-            # Re-allocate completed and incomplete shards round-robin, to loosely preserve ordering
-            def reallocate(shard_states):
-                return [
-                    shard_states[[
-                        (x*self.worldsize+r)%len(shard_states) 
-                        for x in range(
-                            len(shard_states)//self.worldsize 
-                            + int(r < len(shard_states) % self.worldsize)
-                        )
-                    ]] for r in range(self.worldsize)
-                ]
-            completed_shards = reallocate(completed_shards)
-            incomplete_shards = reallocate(incomplete_shards)
-            
-            # Sort completed shards by length
-            completed_shards.sort(key=len)
-            
-            # Reverse sort incomplete shards by length
-            # Minimizes padding by overallocating incomplete shards to underallocated complete shards
-            incomplete_shards.sort(key=len, reverse=True)
-
-            # Pull out shard allocation for this worker
-            # (sort/reverse-sort ensures allocations are off by no more than 1)
-            shards = [
-                completed_shards[self.rank],
-                incomplete_shards[self.rank]
+        # Re-allocate completed and incomplete shards round-robin, to loosely preserve ordering
+        def reallocate(shard_states):
+            return [
+                shard_states[[
+                    (x*worldsize+r)%len(shard_states) 
+                    for x in range(
+                        len(shard_states)//worldsize 
+                        + int(r < len(shard_states) % worldsize)
+                    )
+                ]] for r in range(worldsize)
             ]
-            shard_states = torch.cat(shards)
-            # Pad out with dummy shards if needed
-            shard_states[len(shard_states):,0] = -1
-            shard_states[len(shard_states):,4] = torch.iinfo(torch.int).max
-            return shard_states
+        completed_shards = reallocate(completed_shards)
+        incomplete_shards = reallocate(incomplete_shards)
+        
+        # Sort completed shards by length
+        completed_shards.sort(key=len)
+        
+        # Reverse sort incomplete shards by length
+        # Minimizes padding by overallocating incomplete shards to underallocated complete shards
+        incomplete_shards.sort(key=len, reverse=True)
+
+        # Pull out shard allocation for this worker
+        # (sort/reverse-sort ensures allocations are off by no more than 1)
+        shards = [
+            completed_shards[rank],
+            incomplete_shards[rank]
+        ]
+        shard_states = torch.cat(shards)
+        # Pad out with dummy shards if needed
+        shard_states[len(shard_states):,0] = -1
+        shard_states[len(shard_states):,-1] = torch.iinfo(torch.int).max
+        return shard_states
