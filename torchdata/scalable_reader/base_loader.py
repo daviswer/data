@@ -256,10 +256,10 @@ class ScalableHFReader(_StatefulDataset):
         # Tokenize
         doc = self.tokenizer.encode(doc)
         # Truncate first token if needed
-        if len(doc) > 0 and doc[0] in self.drop_tokens:
+        if len(doc) > 0 and doc[0] in self.drop:
             doc = doc[1:]
         # Recheck len for edge case where doc=[eos]
-        if len(doc) > 0 and doc[-1] in self.drop_tokens:
+        if len(doc) > 0 and doc[-1] in self.drop:
             doc = doc[:-1]
         # Add bos/eos tokens
         if self.bos is not None:
