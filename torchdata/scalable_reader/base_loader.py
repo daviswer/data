@@ -269,7 +269,6 @@ class ScalableHFReader(_StatefulDataset):
     
     def __iter__(self):
         self.setup()
-        self._pre_iter()
         reader = None
         has_yielded = False
         assert len(self.shard_states) > 0 and self.shard_states[:,0].sign().add(1).sign().sum() > 0, f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no logical shards!"
