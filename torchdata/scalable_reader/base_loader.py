@@ -291,6 +291,7 @@ class ScalableHFReader(_StatefulDataset):
                         seq = self._process_doc(doc)
                         yield seq
                     except StopIteration:
+                        print("GOTHERE")
                         break
                 # When shard is complete, reset state and clear position tracker
                 self.shard_states[i][1] = 0
