@@ -234,16 +234,16 @@ class ScalableHFReader(_StatefulDataset):
         """
         # Map rank to underlying shuffled index
         rank = self.shuffle[rank].item()
-
-        if self.rank==3 and "openstax" in self.datapath:
-            print(f"Worker {self.rank} opening new stream {rank} of {nshards}, state {shard_state}")
-
         # Fetch relevant HF data shard
         reader = split_dataset_by_node(self.stream, rank, nshards)
         d = reader.state_dict()
         d['examples_iterable']['examples_iterable']['shard_idx'] = shard_state[1].item()
         d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[2].item()
         reader.load_state_dict(d)
+
+        if self.rank==3 and "openstax" in self.datapath:
+            print(f"Worker {self.rank} opening new stream {rank} of {nshards}, state {shard_state}, reader {reader}")
+
         self.stream = reader        
 
     def _process_doc(self, data):
