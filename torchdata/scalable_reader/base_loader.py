@@ -237,7 +237,7 @@ class ScalableHFReader(_StatefulDataset):
         d = reader.state_dict()
         d['examples_iterable']['examples_iterable']['shard_idx'] = shard_state[1].item()
         d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[2].item()
-        reader.load_state_dict()
+        reader.load_state_dict(d)
         self.stream = reader        
 
     def _process_doc(self, data):
