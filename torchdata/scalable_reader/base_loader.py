@@ -193,6 +193,7 @@ class ScalableHFReader(_StatefulDataset):
 
         # Position
         self.current_shard = -1
+        self.current_stream = None
 
         self.custom_vars = ["shard_states"]
         self.custom_fns = [lambda shard_states: shard_rescale(shard_states, self.rank, self.worldsize)]
@@ -242,9 +243,9 @@ class ScalableHFReader(_StatefulDataset):
         reader.load_state_dict(d)
 
         if self.rank==3 and "openstax" in self.datapath:
-            print(f"Worker {self.rank} opening new stream {rank} of {nshards}, state {shard_state}, reader {reader}")
+            print(f"Worker {self.rank} opening new stream {rank} of {nshards}")
 
-        self.stream = reader        
+        self.current_stream = reader
 
     def _process_doc(self, data):
         """
@@ -288,7 +289,7 @@ class ScalableHFReader(_StatefulDataset):
                 i = k-j
                 shardid = self.shard_states[i][0].item()
                 self.construct_reader(shardid, self.n_logical_shards, self.shard_states[i])
-                reader = iter(self.stream)
+                reader = iter(self.current_stream)
                 # For each shard, iterate through all the remaining docs
                 self.current_shard = i
                 l = 0
