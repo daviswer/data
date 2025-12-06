@@ -230,9 +230,6 @@ class ScalableHFReader(_StatefulDataset):
         """
         TODO 
         """
-
-        print(f"Worker {self.rank} opening new stream {rank} of {self.datapath}")
-
         # Map rank to underlying shuffled index
         rank = self.shuffle[rank].item()
         # Fetch relevant HF data shard
@@ -288,10 +285,14 @@ class ScalableHFReader(_StatefulDataset):
                 reader = iter(self.stream)
                 # For each shard, iterate through all the remaining docs
                 self.current_shard = i
+                l = 0
                 while True:
                     try:
                         doc = next(reader)
                         seq = self._process_doc(doc)
+                        l += 1
+                        if self.rank==3 and "openstax" in self.datapath:
+                            print(l)
                         yield seq
                     except StopIteration:
                         break
