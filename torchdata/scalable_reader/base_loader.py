@@ -308,7 +308,6 @@ class ScalableHFReader(_StatefulDataset):
                 # When shard is complete, reset state and clear position tracker
                 self.shard_states[i][1] = 0
                 self.shard_states[i][2] = 0
-                self.current_shard = -1
                 # Increase epoch count after finishing shard
                 self.shard_states[i][3] += 1
                 # Prioritize unseen data after rescaling by shifting completed shard to end of shard_states
@@ -325,7 +324,7 @@ class ScalableHFReader(_StatefulDataset):
     def state_dict(self):
         # Write current reader's state into shard state
         if self.current_shard != -1:
-            d = self.stream.state_dict()
+            d = self.current_stream.state_dict()
             self.shard_states[self.current_shard][1] = d['examples_iterable']['examples_iterable']['shard_idx']
             self.shard_states[self.current_shard][2] = d['examples_iterable']['examples_iterable']['shard_example_idx']
         return super().state_dict()
