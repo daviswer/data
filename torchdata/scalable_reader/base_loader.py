@@ -236,7 +236,7 @@ class ScalableHFReader(_StatefulDataset):
         rank = self.shuffle[rank].item()
 
         if self.rank==3 and "openstax" in self.datapath:
-            print(f"Worker {self.rank} opening new stream {rank} of {self.datapath}")
+            print(f"Worker {self.rank} opening new stream {rank} of {nshards}")
 
         # Fetch relevant HF data shard
         reader = split_dataset_by_node(self.stream, rank, nshards)
@@ -299,9 +299,9 @@ class ScalableHFReader(_StatefulDataset):
                         if self.rank==3 and "openstax" in self.datapath:
                             print(f"Fetching doc {l}")
                         doc = next(reader)
+                        seq = self._process_doc(doc)
                         if self.rank==3 and "openstax" in self.datapath:
                             print(f"Yielded doc of length {len(doc)}")
-                        seq = self._process_doc(doc)
                         l += 1
                         yield seq
                     except StopIteration:
