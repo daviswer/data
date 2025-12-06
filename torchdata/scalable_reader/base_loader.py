@@ -46,6 +46,8 @@ distributed checkpoints in dcp_utils.py. A simplified, asynchronous (but also mu
 implementation is provided in the unit testing script for validation and illustration purposes.
 """
 
+# TODO: implement min_length
+
 
 class _StatefulDataset(data.IterableDataset):
     """
@@ -258,6 +260,8 @@ class ScalableHFReader(_StatefulDataset):
             doc is not None
         ), f"None of column names {self.col_names} found in file headers {data.keys()}"
         # Tokenize
+        if self.rank==3 and "openstax" in self.datapath:
+            print(".   ", doc)
         doc = self.tokenizer.encode(doc)
         # Truncate first token if needed
         if len(doc) > 0 and doc[0] in self.drop:
