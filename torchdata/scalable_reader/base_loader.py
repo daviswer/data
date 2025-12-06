@@ -301,7 +301,7 @@ class ScalableHFReader(_StatefulDataset):
                         doc = next(reader)
                         seq = self._process_doc(doc)
                         if self.rank==3 and "openstax" in self.datapath:
-                            print(f"Yielded doc of length {len(doc)}")
+                            print(f"Yielded doc of length {len(seq)}")
                         l += 1
                         yield seq
                     except StopIteration:
