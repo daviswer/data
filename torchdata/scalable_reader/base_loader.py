@@ -220,7 +220,7 @@ class ScalableHFReader(_StatefulDataset):
 
             # Pad shard state if this worker is off by one. Id is -1 and visit count is inf.
             self.shard_states[len(my_shards):, 0] = -1
-            self.shard_states[len(my_shards):, 4] = torch.iinfo(torch.int).max
+            self.shard_states[len(my_shards):, 3] = torch.iinfo(torch.int).max
 
             # Open HF stream
             path, name = os.path.split(self.datapath)
