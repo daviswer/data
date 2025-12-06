@@ -243,7 +243,7 @@ class ScalableHFReader(_StatefulDataset):
         reader.load_state_dict(d)
 
         if self.rank==3 and "openstax" in self.datapath:
-            print(f"Worker {self.rank} opening new stream {rank} of {nshards}")
+            print(f"Worker {self.rank} opening new stream {rank} of {nshards}, state {shard_state}, reader {reader}")
 
         self.current_stream = reader
 
