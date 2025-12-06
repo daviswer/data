@@ -230,11 +230,11 @@ class ScalableHFReader(_StatefulDataset):
         """
         TODO 
         """
+
+        print(f"Worker {self.rank} opening new stream {rank} of {self.datapath}")
+
         # Map rank to underlying shuffled index
         rank = self.shuffle[rank].item()
-
-        print(f"Worker {self.rank} opening new stream {rank}")
-
         # Fetch relevant HF data shard
         reader = split_dataset_by_node(self.stream, rank, nshards)
         d = reader.state_dict()
