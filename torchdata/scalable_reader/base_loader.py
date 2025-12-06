@@ -254,7 +254,7 @@ class ScalableHFReader(_StatefulDataset):
             doc is not None
         ), f"None of column names {self.col_names} found in file headers {data.keys()}"
         # Tokenize
-        doc = self.tokenizer.encode(doc[: self.max_doclen])
+        doc = self.tokenizer.encode(doc)
         # Truncate first token if needed
         if len(doc) > 0 and doc[0] in self.drop_tokens:
             doc = doc[1:]
