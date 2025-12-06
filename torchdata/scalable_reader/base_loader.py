@@ -63,9 +63,6 @@ class _StatefulDataset(data.IterableDataset):
     ):
         assert rank >= 0, f"Rank {rank} must be a positive integer"
         assert worldsize > rank, f"Worldsize {worldsize} must be greater than rank {rank}"
-        assert datapath is None or (
-            os.path.isdir(datapath) and len(os.listdir(datapath)) > 0
-        ), f"Data path {datapath} must be a non-empty folder or None"
 
         # Default fields
         self.datapath = datapath
@@ -396,6 +393,9 @@ class ScalableReader(_StatefulDataset):
         seed: int = 42,
     ):
         super().__init__(datapath, rank, worldsize)
+        assert datapath is None or (
+            os.path.isdir(datapath) and len(os.listdir(datapath)) > 0
+        ), f"Data path {datapath} must be a non-empty folder or None"
         self.datapath = datapath
         self.filehandler = filehandler
         self.min_length = min_length  # Ignore any docs shorter than this
