@@ -464,6 +464,9 @@ class ScalableReader(_StatefulDataset):
             # Get your adjusted rank and worldsize
             super().setup()
 
+            # Check that datapath, post setup, is still legal
+            assert os.path.isdir(self.datapath) and len(os.listdir(self.datapath)) > 0, f"Invalid dataset {self.datapath}"
+
             # Get logical shard partitions. Use round-robin allocation to facilitate
             # order preservation during rescaling 
             my_shards = [
