@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from .base_loader import ScalableReader, ScalableHFReader, _StatefulDataset
-from .wrappers import PreprocessDataset,ShuffleDataset,DocPackingDataset,SamplingDataset,_NestedStatefulDataset
+from .wrappers import PreprocessDataset,ShuffleDataset,DocPackingDataset,SamplingDataset,FIMDataset,_NestedStatefulDataset
 from .file_handlers import ShardFileHandler, ArrowHandler, ParquetHandler
 from .dcp_utils import save_ckpt_dcp, load_ckpt_dcp
 
@@ -16,6 +16,7 @@ __all__ = [
     "ShuffleDataset",
     "DocPackingDataset",
     "SamplingDataset",
+    "FIMDataset",
     "ShardFileHandler",
     "ArrowHandler",
     "ParquetHandler",
