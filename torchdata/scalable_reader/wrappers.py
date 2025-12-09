@@ -593,11 +593,11 @@ class FIMDataset(_NestedStatefulDataset):
 
     def state_dict(self):
         # Write generator state manually
-        self.g_state = self.generator.get_state()
+        self.g_state = self.generator.get_state().clone().tolist()
         return super().state_dict()
     
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         # Manually set generator state if it exists
         if self.g_state is not None:
-            self.generator.set_state(self.g_state)
+            self.generator.set_state(torch.tensor(self.g_state, dtype=torch.uint8))
