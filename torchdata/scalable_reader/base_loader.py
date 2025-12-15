@@ -602,6 +602,59 @@ class ScalableReader(_StatefulDataset):
             # Begin new epoch, and verify that after visiting all shards, some data has been produced
             assert has_yielded or len(shardset)!=self.shard_states[:,0].sign().relu().sum().item(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
 
+
+class DummyReader(_StatefulDataset):
+    """
+    As ScalableReader, but tracks no global state and emits random ints
+    """
+
+    def __init__(
+        self, 
+        datapath: str, 
+        rank: int, 
+        worldsize: int,
+        filehandler: ShardFileHandler,
+        delimiter_token: Any,
+        bos_token: Optional[Any] = None,
+        strip_tokens: Optional[Set[Any]] = set(),
+        min_length: int = 1,
+        max_chunksize: int = 1024,
+        n_logical_shards: int = 30720,
+        seed: int = 42,
+    ):
+        super().__init__(datapath, rank, worldsize)
+        self.chunksize = max_chunksize  # Yield chunks at a time if doc is longer than this
+        self.seed = seed
+
+        self.g = None
+        self.g_state = None
+        
+        self.state_vars = ["g_state"]
+
+    def setup(self):
+        """
+        Perform any rank- and path-dependent setup. This operation is deferred from __init__ 
+        to support multiple workers in the dataloader.
+        """
+        if not self.is_setup:
+            # Get your adjusted rank and worldsize
+            super().setup()
+            self.g = torch.Generator(self.seed + self.rank)
+
+    def __iter__(self):
+        self.setup()
+        while True:
+            yield torch.rand(self.chunksize, generator=self.g).mul(100).int().tolist()
+
+    def state_dict(self):
+        self.g_state = self.g.get_state().clone().tolist()
+        return super().state_dict()
+    
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        if self.g_state is not None:
+            self.g.set_state(torch.tensor(self.g_state, dtype=torch.uint8))
+            
     
 def shard_rescale(shard_states: List[torch.Tensor], rank, worldsize):
     """
