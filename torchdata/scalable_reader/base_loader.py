@@ -639,7 +639,7 @@ class DummyReader(_StatefulDataset):
         if not self.is_setup:
             # Get your adjusted rank and worldsize
             super().setup()
-            self.g = torch.Generator(self.seed + self.rank)
+            self.g = torch.Generator().manual_seed(self.seed + self.rank)
 
     def __iter__(self):
         self.setup()
