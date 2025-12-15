@@ -625,6 +625,7 @@ class DummyReader(_StatefulDataset):
         super().__init__(datapath, rank, worldsize)
         self.chunksize = max_chunksize  # Yield chunks at a time if doc is longer than this
         self.seed = seed
+        self.delimiter = delimiter_token
 
         self.g = None
         self.g_state = None
@@ -644,7 +645,9 @@ class DummyReader(_StatefulDataset):
     def __iter__(self):
         self.setup()
         while True:
-            yield torch.rand(self.chunksize, generator=self.g).mul(100).int().tolist()
+            out = torch.rand(self.chunksize, generator=self.g).mul(100).int().tolist()
+            out[-1] = self.delimiter
+            yield out
 
     def state_dict(self):
         self.g_state = self.g.get_state().clone().tolist()
