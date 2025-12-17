@@ -46,7 +46,7 @@ mesh = dist.device_mesh.init_device_mesh("cpu", [world_size//args.cp_degree, arg
 # Check input args
 assert args.logical_shards >= world_size*args.num_workers, f"Logical shards {args.logical_shards} cannot be less than total workers {world_size*args.num_workers}"
 assert args.logical_shards <= 1000, f"Logical shards {args.logical_shards} cannot exceed number of documents 1000"
-assert args.n_steps*args.b_size*world_size < 3000, f"Number of items drawn before saving {args.n_steps*args.b_size*world_size} cannot exceed number of document chunks 3000."
+assert args.n_steps*args.b_size*world_size//args.cp_degree < 3000, f"Number of items drawn before saving {args.n_steps*args.b_size*world_size} cannot exceed number of document chunks 3000."
 
 # Access dataset
 datapath = os.path.join(args.ckpt_path, "dataset")
