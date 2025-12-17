@@ -8,7 +8,7 @@ from torch import distributed as dist
 from copy import deepcopy
 
 from torchdata.stateful_dataloader import StatefulDataLoader
-from torchdata.scalable_reader.scalable_reader import (
+from torchdata.scalable_reader import (
     ArrowHandler,
     PreprocessDataset,
     DocPackingDataset,
@@ -32,6 +32,7 @@ parser.add_argument("--b_size", type=int, default=2, help="Number of data points
 parser.add_argument("--n_steps", type=int, default=30, help="Number of steps to take before saving. (n_steps * b_size * worldsize) cannot exceed number of items in epoch (3000)")
 parser.add_argument("--n_bins", type=int, default=4, help="Number of packing/slicing bins")
 parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--cp_degree", type=int, default=1)
 
 args = parser.parse_args()
 
@@ -40,19 +41,19 @@ args = parser.parse_args()
 rank = int(os.getenv("RANK", 0))
 world_size = int(os.getenv("WORLD_SIZE", 1))
 dist.init_process_group(backend="gloo")
-mesh = dist.device_mesh.init_device_mesh("cpu", [world_size])
+mesh = dist.device_mesh.init_device_mesh("cpu", [world_size//args.cp_degree, args.cp_degree], mesh_dim_names=["dp","cp"])
 
 # Check input args
 assert args.logical_shards >= world_size*args.num_workers, f"Logical shards {args.logical_shards} cannot be less than total workers {world_size*args.num_workers}"
 assert args.logical_shards <= 1000, f"Logical shards {args.logical_shards} cannot exceed number of documents 1000"
-assert args.n_steps*args.b_size*world_size < 3000, f"Number of items drawn before saving {args.n_steps*args.b_size*world_size} cannot exceed number of document chunks 3000."
+assert args.n_steps*args.b_size*world_size//args.cp_degree < 3000, f"Number of items drawn before saving {args.n_steps*args.b_size*world_size} cannot exceed number of document chunks 3000."
 
 # Access dataset
 datapath = os.path.join(args.ckpt_path, "dataset")
 assert os.path.exists(datapath)
 
 # Build dataloader
-data = ScalableReader(datapath, rank, world_size, ArrowHandler, -1, seed=args.seed, max_chunksize=40, n_logical_shards=args.logical_shards)
+data = ScalableReader(datapath, rank//args.cp_degree, world_size//args.cp_degree, ArrowHandler(), -1, seed=args.seed, max_chunksize=40, n_logical_shards=args.logical_shards)
 # Subdata sampling
 data = SamplingDataset(datapath, data, -1, ["subdata","subfolder"], [2,1])
 # Packing and slicing
