@@ -8,7 +8,7 @@ from torch import distributed as dist
 from copy import deepcopy
 
 from torchdata.stateful_dataloader import StatefulDataLoader
-from torchdata.scalable_reader.scalable_reader import (
+from torchdata.scalable_reader import (
     ArrowHandler,
     PreprocessDataset,
     DocPackingDataset,
