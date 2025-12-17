@@ -53,7 +53,7 @@ datapath = os.path.join(args.ckpt_path, "dataset")
 assert os.path.exists(datapath)
 
 # Build dataloader
-data = ScalableReader(datapath, rank//args.cp_degree, world_size//args.cp_degree, ArrowHandler, -1, seed=args.seed, max_chunksize=40, n_logical_shards=args.logical_shards)
+data = ScalableReader(datapath, rank//args.cp_degree, world_size//args.cp_degree, ArrowHandler(), -1, seed=args.seed, max_chunksize=40, n_logical_shards=args.logical_shards)
 # Subdata sampling
 data = SamplingDataset(datapath, data, -1, ["subdata","subfolder"], [2,1])
 # Packing and slicing
