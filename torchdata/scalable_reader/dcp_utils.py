@@ -111,7 +111,7 @@ def save_ckpt_dcp(
     def wrap_shardtensor(x, mesh):
         size = torch.tensor(x.size(0), dtype=torch.long)[None]
         sizes = torch.empty(worldsize, dtype=torch.long)
-        dist.all_gather_into_tensor(sizes, size,group=mesh.get_group(0))
+        dist.all_gather_into_tensor(sizes, size,group=mesh.get_group("dp"))
         offsets = sizes.cumsum(0).roll(1, 0)
         offsets[0] = 0
         global_shape = [sizes.sum()] + list(x.shape[1:])
