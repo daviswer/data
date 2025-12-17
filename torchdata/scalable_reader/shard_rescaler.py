@@ -11,7 +11,7 @@ from typing import List
 
 import torch
 
-from .shard_state import DUMMY_EPOCH
+from .shard_state import DUMMY_EPOCH, DUMMY_SHARD_ID
 
 
 def shard_rescale(shard_states: List[torch.Tensor], rank: int, worldsize: int) -> torch.Tensor:
@@ -59,7 +59,7 @@ def shard_rescale(shard_states: List[torch.Tensor], rank: int, worldsize: int) -
         shard_states = torch.cat(shards)
 
         # Pad out with dummy shards if needed
-        shard_states[len(shard_states) :, 0] = -1
+        shard_states[len(shard_states) :, 0] = DUMMY_SHARD_ID
         shard_states[len(shard_states) :, -1] = DUMMY_EPOCH
 
         return shard_states

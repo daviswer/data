@@ -8,7 +8,7 @@ from .base_loader import _StatefulDataset
 
 
 """
-Implements additional layers of functionality for data loading pipelines built on ScalableReader. 
+Implements additional layers of functionality for data loading pipelines built on ScalableReader.
 
 Additional layers are implemented as wrappers for existing pipelines, adding another stage of
 preprocessing for each layer (i.e. shuffling, subdataset sampling, etc). Wrappers extend
@@ -24,7 +24,7 @@ Example usage is as follows:
 
 This pipeline loads documents from the specified path, pulling from individual subdatasets according
 to specified token ratios, packs and slices the documents into training sequences of length seq_len,
-maintains a buffer of buffer_size sequences to perform local shuffling, and finally converts each 
+maintains a buffer of buffer_size sequences to perform local shuffling, and finally converts each
 data sequence to a torch tensor. It also supports rescalable checkpoint saving and loading.
 """
 
@@ -75,7 +75,7 @@ class _NestedStatefulDataset(_StatefulDataset):
                 prefix = self.statename("", i)
                 subdict = {state_type:{k[len(prefix):]:v
                                        for k,v in state_dict[state_type].items()
-                                       if prefix in k} 
+                                       if prefix in k}
                            for state_type in state_dict}
                 subdata.load_state_dict(subdict)
 
@@ -136,7 +136,7 @@ class ShuffleDataset(_NestedStatefulDataset):
     Passes randomly sampled outputs one by one.
     Ensures local mixing of data without relying on sliding windows or shuffling of large buffers.
     Any two consecutive inputs will be separated by window_size steps in expectation.
-    Rescaling-enabled: buffers that shrink will re-grow to window_size over time, while buffers that 
+    Rescaling-enabled: buffers that shrink will re-grow to window_size over time, while buffers that
     expand will shrink back down to window_size over time.
     Sequences pulled from the wrapped StatefulDataset must all be constant length.
     ...
@@ -226,7 +226,7 @@ class ShuffleDataset(_NestedStatefulDataset):
             self.generator.set_state(torch.tensor(self.g_state, dtype=torch.uint8))
         # Manually set buffer size
         self.buffer_size = len(self.buffer)
-        
+
 
 class DocPackingDataset(_NestedStatefulDataset):
     """
@@ -237,7 +237,7 @@ class DocPackingDataset(_NestedStatefulDataset):
     When the number of right-padding tokens in a buffer falls below the specified threshold, that buffer
     is passed as the next sequence output. Number of buffers is set roughly to n_bins, but may rise/fall
     as documents and fragments are added/flushed. Buffers are redistributed over workers when rescaling.
-    
+
     NB: currently assumes that sequences are numerical, and do not contain the value -100. This can be
     changed in future if it causes problems.
     ...
@@ -250,10 +250,10 @@ class DocPackingDataset(_NestedStatefulDataset):
     n_pads : int
         The maximum number of right-pads allowed in a training sequence
     delimiter_token : Any
-        The value that indicates the end of a document when it occurs at the end of any of the 
+        The value that indicates the end of a document when it occurs at the end of any of the
         subdataset's emitted chunks
     pad_token : Any
-        The value to use as a padding token. Data type should match the underlying data sequences 
+        The value to use as a padding token. Data type should match the underlying data sequences
         being processed.
     n_bins : int
         The target number of buffers to maintain that are filled by incoming data chunks. Higher values
@@ -287,7 +287,7 @@ class DocPackingDataset(_NestedStatefulDataset):
         slack = torch.tensor(self.bins).eq(self.dummy).flip(dims=(1,)).cumprod(dim=1).sum(dim=1)
         n_available = slack.ge(targ).int().sum().item()
         return n_available, slack
-    
+
     def _bin_insert(self, slack, doc):
         # Insert given doc into the fullest bin that can accommodate it
         slack_after = slack.sub(len(doc))
@@ -295,7 +295,7 @@ class DocPackingDataset(_NestedStatefulDataset):
         best_bin = slack_after.argmin().item()
         start = self.len - slack[best_bin].item()
         self.bins[best_bin][start:start+len(doc)] = doc
-        
+
     def __iter__(self):
         self.setup()
         dataset = iter(self.dataset)
@@ -319,7 +319,7 @@ class DocPackingDataset(_NestedStatefulDataset):
                     yield out
                 slack = slack[:-n_yield]
 
-            # If bin count is under target and no empty bins already exist, 
+            # If bin count is under target and no empty bins already exist,
             # add a single new empty bin (grow smoothly to run smoothly)
             if len(self.bins) == 0 or (slack.max() < self.len and len(self.bins) < self.nbins):
                 self.bins.append([self.dummy]*self.len)
@@ -343,7 +343,7 @@ class DocPackingDataset(_NestedStatefulDataset):
                     # Add doc to fullest available bin
                     self._bin_insert(slack, doc)
                 else:
-                    # If doc isn't truncated, or we have too many bins, 
+                    # If doc isn't truncated, or we have too many bins,
                     # truncate and fill one bin before adding another
                     if not doc_trunc or len(self.bins) >= self.nbins:
                         # Find the fullest non-full bin
@@ -366,7 +366,7 @@ class DocPackingDataset(_NestedStatefulDataset):
         # Convert tensor back to nested list
         self.bins = self.bins.tolist()
         return out
-    
+
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         # Convert tensor to nested list
@@ -389,7 +389,7 @@ class SamplingDataset(_NestedStatefulDataset):
     dataset : _StatefulDataset
         Fully instantiated dataset. Cloned across desired subdatasets during setup.
     delimiter_token : Any
-        The value that indicates the end of a document when it occurs at the end of any of the 
+        The value that indicates the end of a document when it occurs at the end of any of the
         subdatasets' emitted chunks
     datasets : list[str] | None
         A list of subfolders to draw from. If None, draws from all non-nested subfolders of datapath.
@@ -406,7 +406,7 @@ class SamplingDataset(_NestedStatefulDataset):
         datapath: str,
         dataset: _StatefulDataset,
         delimiter_token: Any,
-        datasets=None,
+        datasets=None, # TODO: rename this argument to folders or paths
         weights=None,
         verbose=False,
     ):

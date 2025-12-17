@@ -129,10 +129,10 @@ class ShardStateManager:
         self._state = torch.zeros(n_rows, self.n_fields, dtype=torch.int)
 
         # Set shard ids
-        self._state[: len(my_shards), 0] = torch.tensor(my_shards)
+        self._state[: len(my_shards), self.field_enum.SHARD_ID] = torch.tensor(my_shards)
 
         # Pad shard state if this worker is off by one. Id is -1 and visit count is inf.
-        self._state[len(my_shards) :, 0] = DUMMY_SHARD_ID
+        self._state[len(my_shards) :, self.field_enum.SHARD_ID] = DUMMY_SHARD_ID
         self._state[len(my_shards) :, -1] = DUMMY_EPOCH  # epoch field is always last
 
     def _compute_shard_allocation(self) -> List[int]:
@@ -156,7 +156,7 @@ class ShardStateManager:
 
         A shard is valid if its ID is not -1 (DUMMY_SHARD_ID).
         """
-        return (self._state[:, 0] != DUMMY_SHARD_ID).sum() > 0
+        return (self._state[:, self.field_enum.SHARD_ID] != DUMMY_SHARD_ID).sum() > 0
 
     def count_valid_shards(self) -> int:
         """
@@ -164,13 +164,13 @@ class ShardStateManager:
 
         This is used in assertions to verify data was produced.
         """
-        return (self._state[:, 0] > 0).sum().item()
+        return (self._state[:, self.field_enum.SHARD_ID] > 0).sum().item()
 
     def count_non_dummy_shards(self) -> int:
         """
         Count all non-dummy shards (includes shard 0).
         """
-        return (self._state[:, 0] != DUMMY_SHARD_ID).sum().item()
+        return (self._state[:, self.field_enum.SHARD_ID] != DUMMY_SHARD_ID).sum().item()
 
     def get_min_epoch(self) -> int:
         """
@@ -196,7 +196,7 @@ class ShardStateManager:
 
     def get_shard_id(self, idx: int) -> int:
         """Get the logical shard ID at the given index."""
-        return self._state[idx, 0].item()
+        return self._state[idx, self.field_enum.SHARD_ID].item()
 
     def get_shuffled_shard_id(self, shard_id: int) -> int:
         """
