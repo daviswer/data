@@ -40,7 +40,7 @@ args = parser.parse_args()
 rank = int(os.getenv("RANK", 0))
 world_size = int(os.getenv("WORLD_SIZE", 1))
 dist.init_process_group(backend="gloo")
-mesh = dist.device_mesh.init_device_mesh("cpu", [world_size//args.cp_degree, args.cp_degree])
+mesh = dist.device_mesh.init_device_mesh("cpu", [world_size//args.cp_degree, args.cp_degree], mesh_dim_names=["dp","cp"])
 
 # Check input args
 assert args.logical_shards >= world_size*args.num_workers, f"Logical shards {args.logical_shards} cannot be less than total workers {world_size*args.num_workers}"
