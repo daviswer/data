@@ -96,7 +96,7 @@ class ShardStateManager:
         self.seed = seed
 
         # Shuffle for randomizing shard assignments
-        self.shuffle = torch.randperm(
+        self.shuffled_shard_list = torch.randperm(
             n_logical_shards, generator=torch.Generator().manual_seed(seed)
         )
 
@@ -204,7 +204,7 @@ class ShardStateManager:
 
         Used to randomize shard-to-file mapping while maintaining determinism.
         """
-        return self.shuffle[shard_id].item()
+        return self.shuffled_shard_list[shard_id].item()
 
     # ─────────────────────────────────────────────────────────────
     # Position tracking (for ScalableReader)

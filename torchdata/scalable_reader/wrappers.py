@@ -161,7 +161,7 @@ class ShuffleDataset(_NestedStatefulDataset):
         self.buffer: List[List[Any]] = []
         self.buffer_size = 0
         self.state_vars = ["g_state"]
-        self.reshard_vars = ["buffer"]
+        self.reshard_vars = ["buffer"] # TODO: costs of storing buffer on disk, and resharding it using DCP (comms cost?)
         self.seed = seed
 
     def setup(self):

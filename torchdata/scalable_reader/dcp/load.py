@@ -19,6 +19,7 @@ from torch.distributed.tensor._shards_wrapper import LocalShardsWrapper
 from .dtensor_utils import build_dtensor, crawl, unwrap_dtensor
 from .metadata import get_checkpoint_metadata
 
+# TODO: support for storing checkpoints in object storage
 
 def load_ckpt_dcp(
     loader: Any,

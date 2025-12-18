@@ -466,35 +466,40 @@ class ScalableReader(_StatefulDataset):
         if self._shard_manager is not None:
             self._shard_manager.state = value
 
-    def _get_shard_breakdown(self, rank, nshards):
+    def _get_shard_breakdown(self, shard_id, nshards):
         """
         Retrieve the set of (fractional) files assigned to a given logical shard. Returns a list of
         data files, indicating for each file: the file index, and the start and end points, expressed
         as percentage points of the entire file.
         """
-        # Map rank to underlying shuffled index
-        rank = self._shard_manager.get_shuffled_shard_id(rank)
+        # Map shard_id to underlying shuffled index
+        # TODO1: why do we need this ? does this enable shuffling ?
+        # TODO2: we return file_ids here, this assumes the system can pull up random docs based on int file_id
+        # TODO3: since this probably enables shuffle, we should see how we are breaking the user's expectation of shuffle,
+        #    for eg if user has a specific shuffling logic, we are breaking it here,
+        #    these are iterable datasets but probably worth thinking about it.
+        shuffled_shard_id = self._shard_manager.get_shuffled_shard_id(shard_id)
         # Find first doc included in the current shard
         sizelist = torch.tensor(self.filesizes[1])
         sizelist = sizelist/sizelist.float().sum()
         cum_sizelist = sizelist.cumsum(0)
-        start_frac = rank/nshards
-        start_id = len(sizelist) - cum_sizelist.gt(start_frac).sum().item()
+        start_frac = shuffled_shard_id/nshards
+        file_start_id = len(sizelist) - cum_sizelist.gt(start_frac).sum().item()
         # For each doc, assign relevant fractional ownership
         start = start_frac
-        end = (rank+1)/nshards
+        end = (shuffled_shard_id+1)/nshards
         my_files = []  # fileid, start%, end%
         for i, (size, cumsize_incl) in enumerate(
-            zip(sizelist[start_id:].tolist(), cum_sizelist[start_id:].tolist())
+            zip(sizelist[file_start_id:].tolist(), cum_sizelist[file_start_id:].tolist())
         ):
-            id = start_id + i
+            file_id = file_start_id + i
             cumsize = cumsize_incl - size
             if cumsize > end:
                 # No more files to include, stop early
                 break
             elif cumsize <= end and cumsize_incl >= start:
                 my_files.append([
-                    id,
+                    file_id,
                     min(max((start - cumsize) / size, 0), 1),
                     min(max((end - cumsize) / size, 0), 1),
                 ])
