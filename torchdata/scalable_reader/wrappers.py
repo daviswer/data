@@ -158,7 +158,7 @@ class ShuffleDataset(_NestedStatefulDataset):
         self.window_size = window_size
         self.g_state = None
         self.generator = None
-        self.buffer: List[List[Any]] = []
+        self.buffer = torch.empty(window_size, 1)
         self.buffer_size = 0
         self.state_vars = ["g_state"]
         self.reshard_vars = ["buffer"]
@@ -172,60 +172,53 @@ class ShuffleDataset(_NestedStatefulDataset):
     def __iter__(self):
         self.setup()
         dataset = iter(self.dataset)
-        # Pad out buffer if needed
-        self._pad_buffer()
-        first_draw = next(dataset)
+        first_draw = torch.tensor(next(dataset))
         # If buffer entries have wrong length, reset buffer
-        if len(first_draw) != len(self.buffer[0]):
-            self.buffer = []
+        if len(first_draw) != self.buffer.size(1):
+            self.buffer = torch.empty(self.window_size, len(first_draw))
             self.buffer_size = 0
-            self._pad_buffer()
         while True:
             # If buffer is undersized, add a datapoint
             if self.buffer_size < self.window_size:
-                self.buffer[self.buffer_size] = first_draw if first_draw is not None else next(dataset)
+                self.buffer[self.buffer_size] = first_draw if first_draw is not None else torch.tensor(next(dataset))
                 first_draw = None
                 self.buffer_size += 1
             # Swap out randomly sampled value from buffer.
             i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
-            out = self.buffer[i]
+            out = self.buffer[i].tolist()
             if self.buffer_size > self.window_size:
                 # If buffer is large, pop last item into the freed slot.
                 self.buffer[i] = self.buffer[self.buffer_size - 1]
                 self.buffer_size -= 1
             else:
                 # If buffer is small, add new item into the freed slot.
-                self.buffer[i] = first_draw if first_draw is not None else next(dataset)
+                self.buffer[i] = first_draw if first_draw is not None else torch.tensor(next(dataset))
                 first_draw = None
             yield out
-
-    def _pad_buffer(self):
-        if len(self.buffer) < self.window_size:
-            self.buffer += [
-                [],
-            ] * (self.window_size - len(self.buffer))
 
     def state_dict(self):
         # Create generator if it doesn't already exist
         self.setup()
         # Write generator state manually
-        self.g_state = self.generator.get_state().clone().tolist()
+        self.g_state = self.generator.get_state().tolist()
         # Prune buffer so it can be resharded in future
-        self.buffer = torch.tensor(self.buffer[: self.buffer_size])
+        slack = self.buffer[self.buffer_size: ]
+        self.buffer = self.buffer[: self.buffer_size]
         out = super().state_dict()
         # Pad buffer back out again
-        self.buffer = self.buffer.tolist()
-        self._pad_buffer()
+        self.buffer = torch.cat([self.buffer, slack], dim=0)
         return out
 
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
-        self.buffer = self.buffer.tolist()
         # Manually set generator state if it exists
         if self.g_state is not None:
             self.generator.set_state(torch.tensor(self.g_state, dtype=torch.uint8))
         # Manually set buffer size
-        self.buffer_size = len(self.buffer)
+        self.buffer_size = self.buffer.size(0)
+        # Pad out buffer if needed
+        if self.buffer_size < self.window_size:
+            self.buffer = torch.cat([self.buffer, torch.empty(self.window_size-self.buffer_size, self.buffer.size(1))])
         
 
 class DocPackingDataset(_NestedStatefulDataset):
