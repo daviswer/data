@@ -8,6 +8,8 @@ from .base_loader import ScalableReader, ScalableHFReader, _StatefulDataset
 from .wrappers import PreprocessDataset,ShuffleDataset,DocPackingDataset,SamplingDataset,_NestedStatefulDataset
 from .file_handlers import ShardFileHandler, ArrowHandler, ParquetHandler
 from .dcp_utils import save_ckpt_dcp, load_ckpt_dcp
+from .shard_state import ShardField, HFShardField, DUMMY_SHARD_ID, DUMMY_EPOCH, ShardStateManager
+from .shard_rescaler import shard_rescale
 
 __all__ = [
     "ScalableReader",
@@ -23,4 +25,11 @@ __all__ = [
     "load_ckpt_dcp",
     "_StatefulDataset",
     "_NestedStatefulDataset",
+    # Shard state utilities
+    "ShardField",
+    "HFShardField",
+    "DUMMY_SHARD_ID",
+    "DUMMY_EPOCH",
+    "shard_rescale",
+    "ShardStateManager",
 ]
