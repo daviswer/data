@@ -166,8 +166,8 @@ class ShuffleDataset(_NestedStatefulDataset):
 
     def setup(self):
         if not self.is_setup:
-            super().setup()
             self.generator = torch.Generator().manual_seed(self.rank + self.seed)
+        super().setup()
 
     def __iter__(self):
         self.setup()
