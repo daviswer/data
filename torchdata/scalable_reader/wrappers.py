@@ -459,7 +459,9 @@ class SamplingDataset(_NestedStatefulDataset):
                 self.tokens_seen[self.current_iterator] += len(out)
                 if out[-1] == self.delimiter:
                     self.current_iterator = -1
-                yield out
+                # Emit document only if it's not a dummy sequence, from a worker owning no documents
+                if not all(x==self.delimiter for x in out):
+                    yield out
             else:
                 # Choose new subdataset to draw from (whichever is currently most underrepresented
                 # compared to target ratios)

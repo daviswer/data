@@ -599,8 +599,10 @@ class ScalableReader(_StatefulDataset):
                     self.shard_states[i+1:],
                     self.shard_states[i:i+1],
                 ], dim=0)
-            # Begin new epoch, and verify that after visiting all shards, some data has been produced
-            assert has_yielded or len(shardset)!=self.shard_states[:,0].sign().relu().sum().item(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
+            # Begin new epoch. If no data has been produced after visiting all shards, emit chunk of dummy data
+            if not has_yielded and len(shardset)==self.shard_states[:,0].sign().relu().sum().item():
+                print(f"Warning: worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents!")
+                yield [self.eos]*self.chunksize
 
 
 class DummyReader(_StatefulDataset):
