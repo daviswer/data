@@ -158,7 +158,10 @@ class ShuffleDataset(_NestedStatefulDataset):
         self.window_size = window_size
         self.g_state = None
         self.generator = None
-        self.buffer: List[List[Any]] = []
+        self.buffer: List[List[Any]] = [] # holds the entire data - 10000 - GB - savings is okay, loading + resharding might get tricky
+                    # indices 18 - global mapping - NFS - pull up 18.
+                    # actual data / rows
+                    # TODO: how DCP load works?
         self.buffer_size = 0
         self.state_vars = ["g_state"]
         self.reshard_vars = ["buffer"] # TODO: costs of storing buffer on disk, and resharding it using DCP (comms cost?)
@@ -166,8 +169,8 @@ class ShuffleDataset(_NestedStatefulDataset):
 
     def setup(self):
         if not self.is_setup:
+            super().setup()
             self.generator = torch.Generator().manual_seed(self.rank + self.seed)
-        super().setup()
 
     def __iter__(self):
         self.setup()

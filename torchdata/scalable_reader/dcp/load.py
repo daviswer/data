@@ -20,6 +20,7 @@ from .dtensor_utils import build_dtensor, crawl, unwrap_dtensor
 from .metadata import get_checkpoint_metadata
 
 # TODO: support for storing checkpoints in object storage
+    # Titan should decide if this is needed
 
 def load_ckpt_dcp(
     loader: Any,
@@ -38,6 +39,7 @@ def load_ckpt_dcp(
     base = loader.state_dict()
     nworkers = base["_snapshot"]["_main_snapshot"]["_num_workers"]
     # TODO: do we have to get rank and worldsize from loader.dataset? make it get from loader instead?
+       # can get this from the loader
     r = loader.dataset.rank
     w = loader.dataset.worldsize
 

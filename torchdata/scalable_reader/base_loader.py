@@ -478,7 +478,8 @@ class ScalableReader(_StatefulDataset):
         # TODO3: since this probably enables shuffle, we should see how we are breaking the user's expectation of shuffle,
         #    for eg if user has a specific shuffling logic, we are breaking it here,
         #    these are iterable datasets but probably worth thinking about it.
-        shuffled_shard_id = self._shard_manager.get_shuffled_shard_id(shard_id)
+        # shuffle in the algorithm - not default in the system unless asked for.
+        shuffled_shard_id = self._shard_manager.get_shuffled_shard_id(shard_id) # can make this optional! also, on file sort in 546
         # Find first doc included in the current shard
         sizelist = torch.tensor(self.filesizes[1])
         sizelist = sizelist/sizelist.float().sum()
