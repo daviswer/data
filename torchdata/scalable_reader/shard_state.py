@@ -53,6 +53,19 @@ class HFShardField(IntEnum):
     EPOCH = 3
 
 
+class TitanMMShardField(IntEnum):
+    """
+    Column indices for ScalableTitanMMReader shard_states tensor.
+
+    Uses a reduced schema since we're handling non-tensor packer states
+    externally inside the ScalableTitanMMReader itself.
+    """
+
+    SHARD_ID = 0
+    SAMPLE_IDX = 1
+    EPOCH = 3
+
+
 class ShardStateManager:
     """
     Manages the state matrix for logical shards with readable accessors.
@@ -271,6 +284,18 @@ class ShardStateManager:
     def set_hf_shard_example_idx(self, idx: int, value: int) -> None:
         """Set the HF shard_example_idx for shard at given index."""
         self._state[idx, HFShardField.SHARD_EXAMPLE_IDX] = value
+
+    # ─────────────────────────────────────────────────────────────
+    # HuggingFace-specific position tracking (for ScalableHFReader)
+    # ─────────────────────────────────────────────────────────────
+
+    def get_titan_sample_idx(self, idx: int) -> int:
+        """Get the Titan MM sample_idx for shard at given index."""
+        return self._state[idx, TitanMMShardField.SAMPLE_IDX].item()
+
+    def set_titan_sample_idx(self, idx: int, value: int) -> None:
+        """Set the Titan MM sample_idx for shard at given index."""
+        self._state[idx, TitanMMShardField.SAMPLE_IDX] = value
 
     # ─────────────────────────────────────────────────────────────
     # Shard reordering (for prioritizing unseen data after rescaling)

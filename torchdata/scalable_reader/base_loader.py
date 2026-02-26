@@ -1,6 +1,7 @@
 import math
 import os
 from copy import deepcopy
+from functools import partial
 from typing import Any, Callable, List, Optional, Set
 
 import torch
@@ -8,7 +9,7 @@ import torch.utils.data as data
 
 from .file_handlers import ShardFileHandler
 from .shard_rescaler import shard_rescale
-from .shard_state import DUMMY_EPOCH, DUMMY_SHARD_ID, HFShardField, ShardField, ShardStateManager
+from .shard_state import HFShardField, ShardField, ShardStateManager, TitanMMShardField
 
 from datasets import load_dataset
 from datasets.distributed import split_dataset_by_node
@@ -49,7 +50,6 @@ implementation is provided in the unit testing script for validation and illustr
 """
 
 # TODO: implement min_length
-
 
 class _StatefulDataset(data.IterableDataset):
     """
@@ -155,7 +155,144 @@ class _StatefulDataset(data.IterableDataset):
 
     def __iter__(self):
         raise NotImplementedError
+    
 
+class ScalableTitanMMReader(_StatefulDataset):
+    """
+    TODO
+    """
+
+    def __init__(
+        self,
+        data_constructor: Any,  # Titan HuggingFaceMultiModalDataset defined up to rank and worldsize
+        rank: int,
+        worldsize: int,
+        n_logical_shards: int = 30720,
+        seed: int = 42,
+    ):
+        super().__init__("Dummy", rank, worldsize)
+        self.data_constructor = partial(data_constructor, infinite=False)
+        self.n_logical_shards = n_logical_shards
+        self.seed = seed
+
+        # Position
+        self.current_shard = -1
+        self.current_stream = None
+
+        # Shard state manager (initialized in setup)
+        self._shard_manager: Optional[ShardStateManager] = None
+
+        # Packer states
+        self.packer_buffers = {}
+        self.packer_samples = {}
+
+        self.custom_vars = ["shard_states", "packer_buffers", "packer_samples"]
+        self.custom_fns = [
+            lambda shard_states: shard_rescale(shard_states, self.rank, self.worldsize),
+            self.extract_by_shard_states,
+            self.extract_by_shard_states,
+        ]
+
+    def setup(self):
+        """
+        Perform any rank- and path-dependent setup. This operation is deferred from __init__
+        to support multiple workers in the dataloader.
+        """
+        if not self.is_setup:
+            # Get your adjusted rank and worldsize
+            super().setup()
+
+            # Initialize shard state manager with adjusted rank/worldsize
+            self._shard_manager = ShardStateManager(
+                n_logical_shards=self.n_logical_shards,
+                rank=self.rank,
+                worldsize=self.worldsize,
+                field_enum=TitanMMShardField,
+                seed=self.seed,
+            )
+            self._shard_manager.initialize()
+
+    def construct_reader(self, rank, nshards):
+        """
+        TODO
+        """
+        # Map rank to underlying shuffled index
+        datarank = self._shard_manager.get_shuffled_shard_id(rank)
+        # Fetch relevant Titan data shard
+        reader = self.data_constructor(datarank, nshards)
+        reader._sample_idx = self._shard_manager.get_titan_sample_idx(rank)
+        reader.packer.sample_buffer.clear()
+        reader.packer.packed_samples.clear()
+        if rank not in self.packer_buffers:
+            self.packer_buffers[rank] = []
+            self.packer_samples[rank] = []
+        reader.packer.sample_buffer.extend(self.packer_buffers[rank])
+        reader.packer.packed_samples.extend(self.packer_samples[rank])
+        self.current_stream = reader
+
+    def __iter__(self):
+        self.setup()
+        reader = None
+        epochs_without_yielding = 0
+        assert len(self.shard_states) > 0 and self._shard_manager.has_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no logical shards!"
+        while True:
+            has_yielded = False
+            # Isolate undervisited shards using epoch count field of shard_states
+            epoch_count = self._shard_manager.get_min_epoch()
+            shardset = self._shard_manager.get_shards_with_epoch(epoch_count)
+            for j,k in enumerate(shardset):
+                # Account for the relocation of each active shard_state
+                # to the end of self.shard_states after it is exhausted
+                i = k-j
+                shardid = self._shard_manager.get_shard_id(i)
+                self.construct_reader(shardid, self.n_logical_shards, self.shard_states[i])
+                reader = iter(self.current_stream)
+                # For each shard, iterate through all the remaining docs
+                self.current_shard = i
+                while True:
+                    try:
+                        yield next(reader)
+                        has_yielded = True
+                    except StopIteration:
+                        break
+                # When shard is complete, reset state and clear position tracker
+                self._shard_manager.set_titan_sample_idx(i, 0)
+                # Update packer states to account for any overflow
+                self.packer_buffers[i] = list(self.current_stream.packer.sample_buffer)
+                self.packer_samples[i] = list(self.current_stream.packer.packed_samples)
+                # Increase epoch count after finishing shard
+                self._shard_manager.increment_epoch(i)
+                # Prioritize unseen data after rescaling by shifting completed shard to end of shard_states
+                # i.e. shards with (id, epoch_count) [(0,0),(1,1),(2,1),(3,2)] wll produce order:
+                # 0,1,2,0,3,1,2,0,... instead of 0,0,1,2,0,1,2,3,...
+                self._shard_manager.move_shard_to_end(i)
+            if not has_yielded:
+                epochs_without_yielding += 1
+            # Begin new epoch, and verify that after visiting all shards, some data has been produced
+            assert epochs_without_yielding < 3 or len(shardset)!=self._shard_manager.count_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
+
+    def state_dict(self):
+        # Write current reader's state into shard state
+        if self.current_shard != -1:
+            d = self.current_stream.state_dict()
+            self._shard_manager.set_hf_shard_idx(
+                self.current_shard,
+                d['examples_iterable']['examples_iterable']['shard_idx']
+            )
+            self._shard_manager.set_hf_shard_example_idx(
+                self.current_shard,
+                d['examples_iterable']['examples_iterable']['shard_example_idx']
+            )
+        return super().state_dict()
+
+    def state_dict(self):
+        # Write current reader's state into shard state, and packer into packer trackers
+        if self.current_shard != -1:
+            self._shard_manager.set_titan_sample_idx(self.current_shard, self.current_stream._sample_idx)
+            self.packer_buffers[self.current_shard] = list(self.current_stream.packer.sample_buffer)
+            self.packer_samples[self.current_shard] = list(self.current_stream.packer.packed_samples)
+        return super().state_dict()
+        
 
 class ScalableHFReader(_StatefulDataset):
     """
@@ -188,7 +325,6 @@ class ScalableHFReader(_StatefulDataset):
         self.seed = seed
 
         # Setup flags
-        self.is_setup = False
         self.stream = None
 
         # Position
@@ -305,13 +441,12 @@ class ScalableHFReader(_StatefulDataset):
                 reader = iter(self.current_stream)
                 # For each shard, iterate through all the remaining docs
                 self.current_shard = i
-                l = 0
                 while True:
                     try:
                         doc = next(reader)
                         seq = self._process_doc(doc)
-                        l += 1
                         yield seq
+                        has_yielded = True
                     except StopIteration:
                         break
                 # When shard is complete, reset state and clear position tracker
@@ -339,10 +474,6 @@ class ScalableHFReader(_StatefulDataset):
                 d['examples_iterable']['examples_iterable']['shard_example_idx']
             )
         return super().state_dict()
-
-    def shard_rescale(self, shard_states: List[torch.Tensor]):
-        return shard_rescale(shard_states, self.rank, self.worldsize)
-
 
 class ScalableReader(_StatefulDataset):
     """
@@ -434,7 +565,6 @@ class ScalableReader(_StatefulDataset):
         self.cur_file = None
 
         # Setup flags
-        self.is_setup = False
         self.filesizes = None  # [[filenames], [filesizes]]  (constructed pre-iter if not loaded from ckp)
 
         # Shard state manager (initialized in setup)
@@ -637,3 +767,5 @@ class ScalableReader(_StatefulDataset):
                 self._shard_manager.move_shard_to_end(i)
             # Begin new epoch, and verify that after visiting all shards, some data has been produced
             assert has_yielded or len(shardset)!=self._shard_manager.count_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
+
+
