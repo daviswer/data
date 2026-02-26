@@ -193,6 +193,15 @@ class ScalableTitanMMReader(_StatefulDataset):
             self.extract_by_shard_states,
         ]
 
+    def extract_by_shard_states(self, states):
+        shard_inds = self._shard_manager.state[:, TitanMMShardField.SHARD_ID]
+        if len(states) == self.worldsize:
+            # If not rescaling, just pull out the prior state for this worker
+            return states[self.rank]
+        else:
+            raise NotImplementedError
+
+
     def setup(self):
         """
         Perform any rank- and path-dependent setup. This operation is deferred from __init__
