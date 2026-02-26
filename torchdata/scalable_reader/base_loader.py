@@ -251,13 +251,14 @@ class ScalableTitanMMReader(_StatefulDataset):
         # Fetch relevant Titan data shard
         reader = self.data_constructor(dp_rank=datarank, dp_world_size=nshards)
         reader._sample_idx = self._shard_manager.get_titan_sample_idx(rank)
-        reader.packer.sample_buffer.clear()
-        reader.packer.packed_samples.clear()
-        if rank not in self.packer_buffers:
-            self.packer_buffers[rank] = []
-            self.packer_samples[rank] = []
-        reader.packer.sample_buffer.extend(self.packer_buffers[rank])
-        reader.packer.packed_samples.extend(self.packer_samples[rank])
+        if hasattr(reader, "packer"):
+            reader.packer.sample_buffer.clear()
+            reader.packer.packed_samples.clear()
+            if rank not in self.packer_buffers:
+                self.packer_buffers[rank] = []
+                self.packer_samples[rank] = []
+            reader.packer.sample_buffer.extend(self.packer_buffers[rank])
+            reader.packer.packed_samples.extend(self.packer_samples[rank])
         self.current_stream = reader
 
     def __iter__(self):
@@ -288,8 +289,9 @@ class ScalableTitanMMReader(_StatefulDataset):
                 # When shard is complete, reset state and clear position tracker
                 self._shard_manager.set_titan_sample_idx(i, 0)
                 # Update packer states to account for any overflow
-                self.packer_buffers[i] = list(self.current_stream.packer.sample_buffer)
-                self.packer_samples[i] = list(self.current_stream.packer.packed_samples)
+                if hasattr(self.current_stream, "packer"):
+                    self.packer_buffers[shardid] = list(self.current_stream.packer.sample_buffer)
+                    self.packer_samples[shardid] = list(self.current_stream.packer.packed_samples)
                 # Increase epoch count after finishing shard
                 self._shard_manager.increment_epoch(i)
                 # Prioritize unseen data after rescaling by shifting completed shard to end of shard_states
