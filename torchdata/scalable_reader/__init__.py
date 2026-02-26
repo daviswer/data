@@ -14,6 +14,7 @@ from .shard_rescaler import shard_rescale
 __all__ = [
     "ScalableReader",
     "ScalableHFReader",
+    "ScalableTitanMMReader",
     "PreprocessDataset",
     "ShuffleDataset",
     "DocPackingDataset",
