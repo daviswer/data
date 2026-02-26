@@ -201,7 +201,6 @@ class ScalableTitanMMReader(_StatefulDataset):
         else:
             raise NotImplementedError
 
-
     def setup(self):
         """
         Perform any rank- and path-dependent setup. This operation is deferred from __init__
@@ -220,6 +219,28 @@ class ScalableTitanMMReader(_StatefulDataset):
                 seed=self.seed,
             )
             self._shard_manager.initialize()
+    
+    @property
+    def shard_states(self) -> torch.Tensor:
+        """
+        Access the shard states tensor.
+
+        This property provides backward compatibility for code that accesses
+        shard_states directly, while delegating to the ShardStateManager.
+        """
+        if self._shard_manager is None:
+            return None
+        return self._shard_manager.state
+
+    @shard_states.setter
+    def shard_states(self, value: torch.Tensor) -> None:
+        """
+        Set the shard states tensor.
+
+        This is called during checkpoint loading to restore the state.
+        """
+        if self._shard_manager is not None:
+            self._shard_manager.state = value
 
     def construct_reader(self, rank, nshards):
         """
