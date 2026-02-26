@@ -248,8 +248,6 @@ class ScalableTitanMMReader(_StatefulDataset):
         """
         # Map rank to underlying shuffled index
         datarank = self._shard_manager.get_shuffled_shard_id(rank)
-
-        print(f".   Rank {self.rank} constructing shard {datarank}")
         
         # Fetch relevant Titan data shard
         reader = self.data_constructor(dp_rank=datarank, dp_world_size=nshards)
@@ -263,8 +261,6 @@ class ScalableTitanMMReader(_StatefulDataset):
             reader.packer.sample_buffer.extend(self.packer_buffers[rank])
             reader.packer.packed_samples.extend(self.packer_samples[rank])
         self.current_stream = reader
-
-        print(f".   Rank {self.rank} finished building shard {datarank}")
 
     def __iter__(self):
         self.setup()
@@ -289,6 +285,8 @@ class ScalableTitanMMReader(_StatefulDataset):
                     try:
                         yield next(reader)
                         has_yielded = True
+
+                        print(f".   Rank {self.rank} yielded an item!")
                     except StopIteration:
                         break
                 # When shard is complete, reset state and clear position tracker
@@ -305,6 +303,9 @@ class ScalableTitanMMReader(_StatefulDataset):
                 self._shard_manager.move_shard_to_end(i)
             if not has_yielded:
                 epochs_without_yielding += 1
+
+            print(f".   Rank {self.rank} finished an epoch!")
+            
             # Begin new epoch, and verify that after visiting all shards, some data has been produced
             assert epochs_without_yielding < 3 or len(shardset)!=self._shard_manager.count_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
 
