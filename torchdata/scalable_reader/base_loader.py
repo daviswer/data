@@ -248,6 +248,10 @@ class ScalableTitanMMReader(_StatefulDataset):
         """
         # Map rank to underlying shuffled index
         datarank = self._shard_manager.get_shuffled_shard_id(rank)
+
+        if self.rank == 0:
+            print(f".   Constructing shard {datarank}")
+        
         # Fetch relevant Titan data shard
         reader = self.data_constructor(dp_rank=datarank, dp_world_size=nshards)
         reader._sample_idx = self._shard_manager.get_titan_sample_idx(rank)
