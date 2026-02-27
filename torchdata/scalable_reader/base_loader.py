@@ -249,7 +249,7 @@ class ScalableTitanMMReader(_StatefulDataset):
         if self._shard_manager is not None:
             self._shard_manager.state = value
 
-    def construct_reader(self, rank):
+    def construct_reader(self, rank, localrank):
         """
         TODO
         """
@@ -258,7 +258,7 @@ class ScalableTitanMMReader(_StatefulDataset):
         
         # Fetch relevant Titan data shard
         reader = self.data_constructor(dp_rank=datarank, dp_world_size=self.n_logical_shards)
-        reader._sample_idx = self._shard_manager.get_titan_sample_idx(rank)
+        reader._sample_idx = self._shard_manager.get_titan_sample_idx(localrank)
         if hasattr(reader, "packer"):
             reader.packer.sample_buffer.clear()
             reader.packer.packed_samples.clear()
@@ -279,13 +279,13 @@ class ScalableTitanMMReader(_StatefulDataset):
             has_yielded = False
             # Isolate undervisited shards using epoch count field of shard_states
             epoch_count = self._shard_manager.get_min_epoch()
-            shardset = self._shard_manager.get_shards_with_epoch(epoch_count)
+            shardset = self._shard_manager.get_shards_with_epoch(epoch_count).tolist()
             for j,k in enumerate(shardset):
                 # Account for the relocation of each active shard_state
                 # to the end of self.shard_states after it is exhausted
-                i = (k-j).item()
+                i = k-j
                 shardid = self._shard_manager.get_shard_id(i)
-                self.construct_reader(shardid)
+                self.construct_reader(shardid, i)
                 reader = iter(self.current_stream)
                 # For each shard, iterate through all the remaining docs
                 self.current_shard = i
