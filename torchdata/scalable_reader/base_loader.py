@@ -251,6 +251,7 @@ class ScalableTitanMMReader(_StatefulDataset):
         
         # Fetch relevant Titan data shard
         reader = self.data_constructor(dp_rank=datarank, dp_world_size=nshards)
+        print(f".   Rank {self.rank} fetching shard {rank}")
         reader._sample_idx = self._shard_manager.get_titan_sample_idx(rank)
         if hasattr(reader, "packer"):
             reader.packer.sample_buffer.clear()
