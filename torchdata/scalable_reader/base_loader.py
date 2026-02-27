@@ -219,6 +219,10 @@ class ScalableTitanMMReader(_StatefulDataset):
                 seed=self.seed,
             )
             self._shard_manager.initialize()
+
+            # Add packer tracker entries
+            self.packer_buffers = {i:[] for i in self.shard_states[:,TitanMMShardField.SHARD_ID]}
+            self.packer_samples = {i:[] for i in self.shard_states[:,TitanMMShardField.SHARD_ID]}
     
     @property
     def shard_states(self) -> torch.Tensor:
@@ -309,20 +313,6 @@ class ScalableTitanMMReader(_StatefulDataset):
             
             # Begin new epoch, and verify that after visiting all shards, some data has been produced
             assert epochs_without_yielding < 3 or len(shardset)!=self._shard_manager.count_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
-
-    def state_dict(self):
-        # Write current reader's state into shard state
-        if self.current_shard != -1:
-            d = self.current_stream.state_dict()
-            self._shard_manager.set_hf_shard_idx(
-                self.current_shard,
-                d['examples_iterable']['examples_iterable']['shard_idx']
-            )
-            self._shard_manager.set_hf_shard_example_idx(
-                self.current_shard,
-                d['examples_iterable']['examples_iterable']['shard_example_idx']
-            )
-        return super().state_dict()
 
     def state_dict(self):
         # Write current reader's state into shard state, and packer into packer trackers
