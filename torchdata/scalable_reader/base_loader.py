@@ -262,6 +262,7 @@ class ScalableTitanMMReader(_StatefulDataset):
         if hasattr(reader, "packer"):
             reader.packer.sample_buffer.clear()
             reader.packer.packed_samples.clear()
+            print(".   ", self.packer_buffers.keys(), rank)
             if rank not in self.packer_buffers:
                 self.packer_buffers[rank] = []
                 self.packer_samples[rank] = []
