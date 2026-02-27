@@ -202,4 +202,5 @@ def _prepare_custom_vars(dstate: Dict, rank: int, nworkers: int) -> None:
         for i in range(len(custom_vars))
         for k in custom_vars[0].keys()
     }
+    print(f".   Rank {rank} saving custom dict {custom_vars}")
     dstate["custom"] = custom_vars
