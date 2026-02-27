@@ -145,7 +145,8 @@ class _StatefulDataset(data.IterableDataset):
             [self.state_vars, self.broadcast_vars, self.reshard_vars, self.custom_vars],
         ):
             if state_type=="custom":
-                print(f".   Rank {self.rank} custom vars {self.state_dict["custom"]}")
+                cdict = self.state_dict["custom"]
+                print(f".   Rank {self.rank} custom vars {cdict}")
             [setattr(self, flag, state_dict[state_type][self.statename(flag)]) for flag in flags]
         # Apply custom reshard fns to loaded custom values
         if state_dict["custom"]["__rescaling__"]:
