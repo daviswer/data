@@ -249,26 +249,25 @@ class ScalableTitanMMReader(_StatefulDataset):
         if self._shard_manager is not None:
             self._shard_manager.state = value
 
-    def construct_reader(self, rank, nshards):
+    def construct_reader(self, rank):
         """
         TODO
         """
         # Map rank to underlying shuffled index
         datarank = self._shard_manager.get_shuffled_shard_id(rank)
-        globalrank = self._shard_manager.get_shard_id(rank)
         
         # Fetch relevant Titan data shard
-        reader = self.data_constructor(dp_rank=datarank, dp_world_size=nshards)
+        reader = self.data_constructor(dp_rank=datarank, dp_world_size=self.n_logical_shards)
         reader._sample_idx = self._shard_manager.get_titan_sample_idx(rank)
         if hasattr(reader, "packer"):
             reader.packer.sample_buffer.clear()
             reader.packer.packed_samples.clear()
-            print(".   ", self.packer_buffers.keys(), globalrank)
-            if globalrank not in self.packer_buffers:
-                self.packer_buffers[globalrank] = []
-                self.packer_samples[globalrank] = []
-            reader.packer.sample_buffer.extend(self.packer_buffers[globalrank])
-            reader.packer.packed_samples.extend(self.packer_samples[globalrank])
+            print(".   ", self.packer_buffers.keys(), rank)
+            if rank not in self.packer_buffers:
+                self.packer_buffers[rank] = []
+                self.packer_samples[rank] = []
+            reader.packer.sample_buffer.extend(self.packer_buffers[rank])
+            reader.packer.packed_samples.extend(self.packer_samples[rank])
         self.current_stream = reader
 
     def __iter__(self):
@@ -286,7 +285,7 @@ class ScalableTitanMMReader(_StatefulDataset):
                 # to the end of self.shard_states after it is exhausted
                 i = (k-j).item()
                 shardid = self._shard_manager.get_shard_id(i)
-                self.construct_reader(i, self.n_logical_shards)
+                self.construct_reader(shardid)
                 reader = iter(self.current_stream)
                 # For each shard, iterate through all the remaining docs
                 self.current_shard = i
