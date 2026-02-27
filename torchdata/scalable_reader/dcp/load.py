@@ -51,6 +51,7 @@ def load_ckpt_dcp(
 
     # Get checkpoint metadata
     meta = get_checkpoint_metadata(path)
+    print(f".   Meta dict for custom loading: {meta["custom"]}")
 
     # Load each category
     if easy_load:
