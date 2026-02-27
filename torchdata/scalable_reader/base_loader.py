@@ -328,8 +328,9 @@ class ScalableTitanMMReader(_StatefulDataset):
         # Write current reader's state into shard state, and packer into packer trackers
         if self.current_shard != -1:
             self._shard_manager.set_titan_sample_idx(self.current_shard, self.current_stream._sample_idx)
-            self.packer_buffers[self.current_shard] = list(self.current_stream.packer.sample_buffer)
-            self.packer_samples[self.current_shard] = list(self.current_stream.packer.packed_samples)
+            if hasattr(self.current_stream, "packer"):
+                self.packer_buffers[self.current_shard] = list(self.current_stream.packer.sample_buffer)
+                self.packer_samples[self.current_shard] = list(self.current_stream.packer.packed_samples)
         return super().state_dict()
         
 
