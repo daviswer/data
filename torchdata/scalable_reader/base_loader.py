@@ -322,6 +322,8 @@ class ScalableTitanMMReader(_StatefulDataset):
         # (since dict items get flattened as part of the state dict by dcp)
         self.packer_buffers_state = [[k,v] for k,v in self.packer_buffers.items()]
         self.packer_samples_state = [[k,v] for k,v in self.packer_samples.items()]
+        if self.rank==0:
+            print(".   ", self.packer_buffers_state, self.packer_samples_state)
         return super().state_dict()
     
     def load_state_dict(self, state_dict):

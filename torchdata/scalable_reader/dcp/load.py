@@ -403,7 +403,6 @@ def _load_custom_easy(
         }
         for p in prefixes
     ]
-    print(".   ", custom_vars)
     dstate["custom"] = custom_vars
 
 
