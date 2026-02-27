@@ -168,7 +168,7 @@ class ScalableTitanMMReader(_StatefulDataset):
         rank: int,
         worldsize: int,
         n_logical_shards: int = 30720,
-        seed: int = 42,
+        seed: int = 421,
     ):
         super().__init__("Dummy", rank, worldsize)
         self.data_constructor = partial(data_constructor, infinite=False)
