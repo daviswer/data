@@ -144,9 +144,6 @@ class _StatefulDataset(data.IterableDataset):
             ["state", "broadcast", "reshard", "custom"],
             [self.state_vars, self.broadcast_vars, self.reshard_vars, self.custom_vars],
         ):
-            if state_type=="custom":
-                cdict = state_dict["custom"]
-                print(f".   Rank {self.rank} custom vars {cdict}")
             [setattr(self, flag, state_dict[state_type][self.statename(flag)]) for flag in flags]
         # Apply custom reshard fns to loaded custom values
         if state_dict["custom"]["__rescaling__"]:
@@ -188,8 +185,10 @@ class ScalableTitanMMReader(_StatefulDataset):
         # Packer states
         self.packer_buffers = {}
         self.packer_samples = {}
+        self.packer_buffers_state = []
+        self.packer_samples_state = []
 
-        self.custom_vars = ["shard_states", "packer_buffers", "packer_samples"]
+        self.custom_vars = ["shard_states", "packer_buffers_state", "packer_samples_state"]
         self.custom_fns = [
             lambda shard_states: shard_rescale(shard_states, self.rank, self.worldsize),
             self.extract_by_shard_states,
@@ -258,7 +257,6 @@ class ScalableTitanMMReader(_StatefulDataset):
         
         # Fetch relevant Titan data shard
         reader = self.data_constructor(dp_rank=datarank, dp_world_size=nshards)
-        print(f".   Rank {self.rank} fetching shard {rank}")
         reader._sample_idx = self._shard_manager.get_titan_sample_idx(rank)
         if hasattr(reader, "packer"):
             reader.packer.sample_buffer.clear()
@@ -293,8 +291,6 @@ class ScalableTitanMMReader(_StatefulDataset):
                     try:
                         yield next(reader)
                         has_yielded = True
-
-                        print(f".   Rank {self.rank} yielded an item!")
                     except StopIteration:
                         break
                 # When shard is complete, reset state and clear position tracker
@@ -311,8 +307,6 @@ class ScalableTitanMMReader(_StatefulDataset):
                 self._shard_manager.move_shard_to_end(i)
             if not has_yielded:
                 epochs_without_yielding += 1
-
-            print(f".   Rank {self.rank} finished an epoch!")
             
             # Begin new epoch, and verify that after visiting all shards, some data has been produced
             assert epochs_without_yielding < 3 or len(shardset)!=self._shard_manager.count_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
@@ -324,7 +318,17 @@ class ScalableTitanMMReader(_StatefulDataset):
             if hasattr(self.current_stream, "packer"):
                 self.packer_buffers[self.current_shard] = list(self.current_stream.packer.sample_buffer)
                 self.packer_samples[self.current_shard] = list(self.current_stream.packer.packed_samples)
+        # Pass packer tracker states into state spots 
+        # (since dict items get flattened as part of the state dict by dcp)
+        self.packer_buffers_state = [[k,v] for k,v in self.packer_buffers.items()]
+        self.packer_samples_state = [[k,v] for k,v in self.packer_samples.items()]
         return super().state_dict()
+    
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        # Read packer tracker states into packer trackers
+        self.packer_buffers = {x[0]:x[1] for x in self.packer_buffers_state}
+        self.packer_samples = {x[0]:x[1] for x in self.packer_samples_state}
         
 
 class ScalableHFReader(_StatefulDataset):
