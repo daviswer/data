@@ -278,7 +278,7 @@ class ScalableTitanMMReader(_StatefulDataset):
                 # to the end of self.shard_states after it is exhausted
                 i = k-j
                 shardid = self._shard_manager.get_shard_id(i)
-                self.construct_reader(shardid, self.n_logical_shards)
+                self.construct_reader(i, self.n_logical_shards)
                 reader = iter(self.current_stream)
                 # For each shard, iterate through all the remaining docs
                 self.current_shard = i
