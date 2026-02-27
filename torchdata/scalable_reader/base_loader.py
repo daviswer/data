@@ -221,9 +221,8 @@ class ScalableTitanMMReader(_StatefulDataset):
             self._shard_manager.initialize()
 
             # Add packer tracker entries
-            print(f".   Rank {self.rank} shards {self.shard_states[:,TitanMMShardField.SHARD_ID]}")
-            self.packer_buffers = {i:[] for i in self.shard_states[:,TitanMMShardField.SHARD_ID]}
-            self.packer_samples = {i:[] for i in self.shard_states[:,TitanMMShardField.SHARD_ID]}
+            self.packer_buffers = {i.item():[] for i in self.shard_states[:,TitanMMShardField.SHARD_ID]}
+            self.packer_samples = {i.item():[] for i in self.shard_states[:,TitanMMShardField.SHARD_ID]}
     
     @property
     def shard_states(self) -> torch.Tensor:
