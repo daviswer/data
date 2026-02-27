@@ -1,5 +1,6 @@
 import math
 import os
+import pickle
 from copy import deepcopy
 from functools import partial
 from typing import Any, Callable, List, Optional, Set
@@ -320,17 +321,15 @@ class ScalableTitanMMReader(_StatefulDataset):
                 self.packer_samples[self.current_shard] = list(self.current_stream.packer.packed_samples)
         # Pass packer tracker states into state spots 
         # (since dict items get flattened as part of the state dict by dcp)
-        self.packer_buffers_state = [[k,v] for k,v in self.packer_buffers.items()]
-        self.packer_samples_state = [[k,v] for k,v in self.packer_samples.items()]
-        if self.rank==0:
-            print(".   ", self.packer_buffers_state, self.packer_samples_state)
+        self.packer_buffers_state = pickle.dumps(self.packer_buffers)
+        self.packer_samples_state = pickle.dumps(self.packer_samples)
         return super().state_dict()
     
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         # Read packer tracker states into packer trackers
-        self.packer_buffers = {x[0]:x[1] for x in self.packer_buffers_state}
-        self.packer_samples = {x[0]:x[1] for x in self.packer_samples_state}
+        self.packer_buffers = pickle.loads(self.packer_buffers_state)
+        self.packer_samples = pickle.loads(self.packer_samples_state)
         
 
 class ScalableHFReader(_StatefulDataset):
