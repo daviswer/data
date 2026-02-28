@@ -220,8 +220,9 @@ def _load_reshard_vars(
 
     # Convert from dtensor back to List[tensor]
     # After DCP loads the rank's DTensor, split it back into per-worker tensors
+    # Ensure tensors are on CPU to avoid CUDA errors in DataLoader worker processes
     reshard_vars = {
-        k: v.to_local().local_shards()[0].split(local_split[k])
+        k: v.to_local().local_shards()[0].cpu().split(local_split[k])
         for k, v in reshard_vars.items()
     }
 
@@ -258,6 +259,7 @@ def _build_reshard_easy(
                     torch.empty(
                         v.chunks[rank].sizes,
                         dtype=v.properties.dtype,
+                        device="cpu",
                     )
                 ],
                 local_offsets=[v.chunks[rank].offsets],
@@ -315,6 +317,7 @@ def _build_reshard_rescale(
                     torch.empty(
                         local_shard_shape,
                         dtype=v.properties.dtype,
+                        device="cpu",
                     )
                 ],
                 local_offsets=[local_shard_offsets],
@@ -383,7 +386,7 @@ def _load_custom_easy(
     prefixes = [f"rank{rank * nworkers + i}" for i in range(nworkers)]
     custom_vars = {
         k: (
-            torch.empty(v.size, dtype=v.properties.dtype)
+            torch.empty(v.size, dtype=v.properties.dtype, device="cpu")
             if isinstance(v, TensorStorageMetadata)
             else None
         )
@@ -429,7 +432,7 @@ def _load_custom_rescale(
     """
     custom_vars = {
         k: (
-            torch.empty(v.size, dtype=v.properties.dtype)
+            torch.empty(v.size, dtype=v.properties.dtype, device="cpu")
             if isinstance(v, TensorStorageMetadata)
             else None
         )

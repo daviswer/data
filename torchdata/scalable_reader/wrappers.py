@@ -363,8 +363,8 @@ class DocPackingDataset(_NestedStatefulDataset):
                         self.bins.append(doc + [self.dummy] * (self.len - len(doc)))
 
     def state_dict(self):
-        # Convert self.bins to tensor
-        self.bins = torch.tensor(self.bins)
+        # Convert self.bins to tensor (force CPU to avoid CUDA errors in workers)
+        self.bins = torch.tensor(self.bins, device="cpu")
         out = super().state_dict()
         # Convert tensor back to nested list
         self.bins = self.bins.tolist()
@@ -372,8 +372,11 @@ class DocPackingDataset(_NestedStatefulDataset):
 
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
-        # Convert tensor to nested list
-        self.bins = self.bins.tolist()
+        # Ensure bins is on CPU before converting to list
+        if isinstance(self.bins, torch.Tensor):
+            self.bins = self.bins.cpu().tolist()
+        else:
+            self.bins = self.bins.tolist() if hasattr(self.bins, 'tolist') else list(self.bins)
 
 
 class SamplingDataset(_NestedStatefulDataset):

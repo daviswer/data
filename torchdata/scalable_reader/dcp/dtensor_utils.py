@@ -119,7 +119,7 @@ def build_dtensor(
     Returns:
         Empty DTensor with correct shape for this rank
     """
-    x = torch.empty(meta.chunks[rank].sizes, dtype=meta.properties.dtype)
+    x = torch.empty(meta.chunks[rank].sizes, dtype=meta.properties.dtype, device="cpu")
     return dtensor.DTensor.from_local(
         x, mesh, [dtensor.placement_types.Shard(0)]
     )
