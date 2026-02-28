@@ -1,7 +1,7 @@
 import math
 import os
 from copy import deepcopy
-from typing import Any, Callable, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import torch
 import torch.utils.data as data
@@ -159,7 +159,50 @@ class _StatefulDataset(data.IterableDataset):
 
 class ScalableHFReader(_StatefulDataset):
     """
-    TODO
+    Iterates through a HuggingFace dataset with rescalable checkpoint support.
+
+    Supports two output modes controlled by `output_row_dict`:
+    - output_row_dict=True: Returns raw row dicts (for multi-modal or custom processing)
+    - output_row_dict=False: Returns tokenized sequences (requires tokenizer)
+
+    Rescalability is achieved by:
+    1. Dividing data into n_logical_shards (e.g., 30720)
+    2. Allocating shards round-robin to workers
+    3. Using HF's split_dataset_by_node for actual data access
+    4. Tracking position via HF's internal state (shard_idx, shard_example_idx)
+
+    Args
+    ----
+    datapath : str
+        HuggingFace dataset path (e.g., "path/name" or just "path").
+    rank : int
+        Rank of the current device w.r.t. data parallelism.
+    worldsize : int
+        Total number of devices w.r.t. data parallelism.
+    col_names : List[str]
+        Column names to extract from each row. In raw mode, returns dict with
+        all matching columns. In tokenized mode, uses first matching column.
+    output_row_dict : bool
+        If True, yields raw row dicts with requested columns (multi-modal mode).
+        If False, yields tokenized sequences (requires tokenizer/delimiter).
+    tokenizer : Tokenizer, optional
+        Required when output_row_dict=False. Used to tokenize text.
+    delimiter_token : Any, optional
+        End-of-sequence token. Required when output_row_dict=False.
+    bos_token : Any, optional
+        Beginning-of-sequence token. Only used when output_row_dict=False.
+    strip_tokens : Set[Any], optional
+        Tokens to strip from begin/end of tokenized docs.
+    min_length : int
+        Minimum doc length (only applies when output_row_dict=False).
+    split : str
+        Dataset split to use (e.g., "train", "validation").
+    n_logical_shards : int
+        Number of logical data partitions for rescaling.
+    seed : int
+        Random seed for shard shuffling.
+    streaming : bool
+        Whether to use HF streaming mode.
     """
 
     def __init__(
@@ -167,25 +210,38 @@ class ScalableHFReader(_StatefulDataset):
         datapath: str,
         rank: int,
         worldsize: int,
-        tokenizer: Tokenizer,
-        delimiter_token: Any,
-        bos_token: Optional[Any] = None,
-        strip_tokens: Optional[Set[Any]] = set(),
-        min_length: int = 1,
         col_names: List[str] = ["text", "contents", "tokens"],
+        output_row_dict: bool = False,
+        tokenizer: Optional[Tokenizer] = None,
+        delimiter_token: Optional[Any] = None,
+        bos_token: Optional[Any] = None,
+        strip_tokens: Optional[Set[Any]] = None,
+        min_length: int = 1,
+        split: str = "train",
         n_logical_shards: int = 30720,
         seed: int = 42,
+        streaming: bool = True,
     ):
         super().__init__(datapath, rank, worldsize)
         self.datapath = datapath
+        self.col_names = col_names
+        self.output_row_dict = output_row_dict
         self.tokenizer = tokenizer
-        self.min_length = min_length  # Ignore any docs shorter than this
-        self.eos = delimiter_token  # Inserted between each doc
-        self.bos = bos_token  # Inserted before each doc (optional)
-        self.drop = strip_tokens  # Tokens to drop from begin/end of doc (replaced by above delimiter/bos)
-        self.col_names = col_names  # For each data point, grab first field that matches an entry in this list
+        self.min_length = min_length
+        self.eos = delimiter_token
+        self.bos = bos_token
+        self.drop = strip_tokens if strip_tokens is not None else set()
+        self.split = split
         self.n_logical_shards = n_logical_shards
         self.seed = seed
+        self.streaming = streaming
+
+        # Validate: if not output_row_dict, tokenizer and delimiter are required
+        if not self.output_row_dict:
+            if self.tokenizer is None:
+                raise ValueError("tokenizer is required when output_row_dict=False")
+            if self.eos is None:
+                raise ValueError("delimiter_token is required when output_row_dict=False")
 
         # Setup flags
         self.is_setup = False
@@ -243,12 +299,23 @@ class ScalableHFReader(_StatefulDataset):
             self._shard_manager.initialize()
 
             # Open HF stream
-            path, name = os.path.split(self.datapath)
-            self.stream = load_dataset(path, name=name, split="train", streaming=True)
+            # datapath format: "path/name" or just "path"
+            if "/" in self.datapath:
+                path, name = os.path.split(self.datapath)
+            else:
+                path = self.datapath
+                name = None
+
+            self.stream = load_dataset(
+                path,
+                name=name,
+                split=self.split,
+                streaming=self.streaming
+            )
 
     def construct_reader(self, rank, nshards, shard_state):
         """
-        TODO
+        Construct an HF iterator for a specific logical shard.
         """
         # Map rank to underlying shuffled index
         rank = self._shard_manager.get_shuffled_shard_id(rank)
@@ -260,32 +327,47 @@ class ScalableHFReader(_StatefulDataset):
         reader.load_state_dict(d)
         self.current_stream = reader
 
-    def _process_doc(self, data):
+    def _process_row(self, data: Dict[str, Any]) -> Any:
         """
-        Tokenize doc and handle bos/eos
+        Process a raw HF row. Returns either:
+        - Dict[str, Any]: Raw row with requested columns (if output_row_dict=True)
+        - List[int]: Tokenized sequence with bos/eos (if output_row_dict=False)
         """
-        # Pull out relevant text field
-        doc = None
-        for name in self.col_names:
-            if name in data.keys():
-                doc = data[name]
-                break
-        assert (
-            doc is not None
-        ), f"None of column names {self.col_names} found in file headers {data.keys()}"
-        # Tokenize
-        doc = self.tokenizer.encode(doc)
-        # Truncate first token if needed
-        if len(doc) > 0 and doc[0] in self.drop:
-            doc = doc[1:]
-        # Recheck len for edge case where doc=[eos]
-        if len(doc) > 0 and doc[-1] in self.drop:
-            doc = doc[:-1]
-        # Add bos/eos tokens
-        if self.bos is not None:
-            doc = [self.bos] + doc
-        doc = doc + [self.eos]
-        return doc
+        if self.output_row_dict:
+            # Multi-modal / raw mode: return dict with requested columns
+            row = {}
+            for name in self.col_names:
+                if name in data:
+                    row[name] = data[name]
+            if not row:
+                raise ValueError(
+                    f"None of column names {self.col_names} found in row. "
+                    f"Available: {list(data.keys())}"
+                )
+            return row
+        else:
+            # Text mode: tokenize first matching column
+            doc = None
+            for name in self.col_names:
+                if name in data.keys():
+                    doc = data[name]
+                    break
+            assert (
+                doc is not None
+            ), f"None of column names {self.col_names} found in file headers {data.keys()}"
+            # Tokenize
+            doc = self.tokenizer.encode(doc)
+            # Truncate first token if needed
+            if len(doc) > 0 and doc[0] in self.drop:
+                doc = doc[1:]
+            # Recheck len for edge case where doc=[eos]
+            if len(doc) > 0 and doc[-1] in self.drop:
+                doc = doc[:-1]
+            # Add bos/eos tokens
+            if self.bos is not None:
+                doc = [self.bos] + doc
+            doc = doc + [self.eos]
+            return doc
 
     def __iter__(self):
         self.setup()
@@ -305,13 +387,15 @@ class ScalableHFReader(_StatefulDataset):
                 reader = iter(self.current_stream)
                 # For each shard, iterate through all the remaining docs
                 self.current_shard = i
-                l = 0
                 while True:
                     try:
-                        doc = next(reader)
-                        seq = self._process_doc(doc)
-                        l += 1
-                        yield seq
+                        raw_row = next(reader)
+                        processed = self._process_row(raw_row)
+                        # Skip short docs in tokenized mode
+                        if not self.output_row_dict and len(processed) < self.min_length:
+                            continue
+                        yield processed
+                        has_yielded = True
                     except StopIteration:
                         break
                 # When shard is complete, reset state and clear position tracker
