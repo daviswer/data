@@ -198,9 +198,10 @@ class ScalableTitanMMReader(_StatefulDataset):
 
     def extract_by_shard_states(self, states):
         shard_inds = self.shard_states[:, TitanMMShardField.SHARD_ID]
+        # TODO: unpickle list of states, merge into global dict, extract relevant ranks, write to var
         if len(states) == self.worldsize:
-            if self.rank == 0:
-                print(".   PACKERS:", states)
+            # This covers the case where the number of gpus changes, but the number of dataloader
+            # workers does not. In this case, simply pull out the corresponding rank.
             return pickle.loads(states[self.rank])
         else:
             raise NotImplementedError
@@ -330,11 +331,10 @@ class ScalableTitanMMReader(_StatefulDataset):
     
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
-        # Read packer tracker states into packer trackers
-        self.packer_buffers = self.packer_buffers_state
-        self.packer_samples = self.packer_samples_state
-        # self.packer_buffers = pickle.loads(self.packer_buffers_state)
-        # self.packer_samples = pickle.loads(self.packer_samples_state)
+        # If rescaling fn wasn't called, read packer tracker states into packer trackers
+        if len(self.packer_buffers)==0:
+            self.packer_buffers = pickle.loads(self.packer_buffers_state)
+            self.packer_samples = pickle.loads(self.packer_samples_state)
         
 
 class ScalableHFReader(_StatefulDataset):
