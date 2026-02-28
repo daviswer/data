@@ -22,6 +22,8 @@ def shard_rescale(shard_states: List[torch.Tensor], rank: int, worldsize: int) -
     receives the same number of visited, unvisited, and total shards (at most off by one).
     """
     if len(shard_states) == worldsize:
+        if rank==0:
+            print(".   ", shard_states)
         # If not rescaling, just pull out the prior state for this worker
         return shard_states[rank]
     else:
