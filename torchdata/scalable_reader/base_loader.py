@@ -203,8 +203,6 @@ class ScalableTitanMMReader(_StatefulDataset):
             # workers does not. In this case, simply pull out the corresponding rank.
             return pickle.loads(states[self.rank])
         else:
-            # TODO: unpickle list of states, merge into global dict, extract relevant ranks, write to var
-            print(f".   Rank {self.rank} fetching {shard_inds.tolist()}")
             states = [pickle.loads(x) for x in states]
             mergestates = {}
             for x in states:
@@ -272,7 +270,6 @@ class ScalableTitanMMReader(_StatefulDataset):
         if hasattr(reader, "packer"):
             reader.packer.sample_buffer.clear()
             reader.packer.packed_samples.clear()
-            print(".   ", self.packer_buffers.keys(), rank)
             if rank not in self.packer_buffers:
                 self.packer_buffers[rank] = []
                 self.packer_samples[rank] = []
