@@ -5,6 +5,7 @@ from typing import Any, Callable, List
 import torch
 
 from .base_loader import _StatefulDataset
+from .shard_rescaler import naive_rescale
 
 
 """
@@ -480,3 +481,49 @@ class SamplingDataset(_NestedStatefulDataset):
                 ]
                 offset_argmax = min((diff, i) for i, diff in enumerate(offset))[1]
                 self.current_iterator = offset_argmax
+
+
+class TitanMMPackingDataset(_NestedStatefulDataset):
+    """
+    TODO
+    """
+
+    def __init__(
+        self,
+        dataset: _StatefulDataset,
+        packer: Any,  # Titan packer, fully instantiated
+    ):
+        super().__init__(dataset)
+        self.packer = packer
+
+        # Packer states
+        self.packer_buffers_state = []
+        self.packer_samples_state = []
+
+        self.custom_vars = ["packer_buffers_state", "packer_samples_state"]
+        self.custom_fns = [
+            lambda x: naive_rescale(x, self.rank, self.worldsize),
+            lambda x: naive_rescale(x, self.rank, self.worldsize),
+        ]
+
+    def __iter__(self):
+        dataset = iter(self.dataset)
+        while True:
+            out = next(dataset)
+            self.packer.add_sample(out)
+            if self.packer.has_batch_ready():
+                batch = self.packer.get_next_batch()
+                if batch:
+                    yield from batch
+
+    def state_dict(self):
+        # Write packer's state into shard state
+        self.packer_buffers_state = self.packer.sample_buffer
+        self.packer_samples_state = self.packer.packed_samples
+        return super().state_dict()
+    
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        # Read shard state into packer's state
+        self.packer.sample_buffer = self.packer_buffers_state
+        self.packer.packed_samples = self.packer_samples_state

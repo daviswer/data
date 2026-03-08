@@ -9,7 +9,7 @@ import torch
 import torch.utils.data as data
 
 from .file_handlers import ShardFileHandler
-from .shard_rescaler import shard_rescale
+from .shard_rescaler import epoch_balanced_rescale
 from .shard_state import HFShardField, ShardField, ShardStateManager, TitanMMShardField
 
 from datasets import load_dataset
@@ -191,7 +191,7 @@ class ScalableTitanMMReader(_StatefulDataset):
 
         self.custom_vars = ["shard_states", "packer_buffers_state", "packer_samples_state"]
         self.custom_fns = [
-            lambda shard_states: shard_rescale(shard_states, self.rank, self.worldsize),
+            lambda shard_states: epoch_balanced_rescale(shard_states, self.rank, self.worldsize),
             self.extract_by_shard_states,
             self.extract_by_shard_states,
         ]
@@ -340,6 +340,148 @@ class ScalableTitanMMReader(_StatefulDataset):
         if len(self.packer_buffers)==0:
             self.packer_buffers = pickle.loads(self.packer_buffers_state)
             self.packer_samples = pickle.loads(self.packer_samples_state)
+
+
+class ScalableMMReader(_StatefulDataset):
+    """
+    TODO
+    """
+
+    def __init__(
+        self,
+        dataset: Any,  # HuggingFaceMultiModalDataset, fully instantiated
+        rank: int,
+        worldsize: int,
+        n_logical_shards: int = 30720,
+        sample_processor: Any = lambda x: x,  # fn of single arg for stateless processing of data items
+        max_seq_len: int = 131072,
+        seed: int = 42,
+    ):
+        super().__init__("HFDataset", rank, worldsize)
+        self.data = dataset
+        self.n_logical_shards = n_logical_shards
+        self.sample_processor = sample_processor
+        self.max_seq_len = max_seq_len
+        self.seed = seed
+
+        # Position
+        self.current_shard = -1
+        self.current_stream = None
+
+        # Shard state manager (initialized in setup)
+        self._shard_manager: Optional[ShardStateManager] = None
+
+        self.custom_vars = ["shard_states"]
+        self.custom_fns = [
+            lambda shard_states: epoch_balanced_rescale(shard_states, self.rank, self.worldsize),
+        ]
+
+    def setup(self):
+        """
+        Perform any rank- and path-dependent setup. This operation is deferred from __init__
+        to support multiple workers in the dataloader.
+        """
+        if not self.is_setup:
+            # Get your adjusted rank and worldsize
+            super().setup()
+
+            # Initialize shard state manager with adjusted rank/worldsize
+            self._shard_manager = ShardStateManager(
+                n_logical_shards=self.n_logical_shards,
+                rank=self.rank,
+                worldsize=self.worldsize,
+                field_enum=HFShardField,
+                seed=self.seed,
+            )
+            self._shard_manager.initialize()
+
+    @property
+    def shard_states(self) -> torch.Tensor:
+        """
+        Access the shard states tensor.
+
+        This property provides backward compatibility for code that accesses
+        shard_states directly, while delegating to the ShardStateManager.
+        """
+        if self._shard_manager is None:
+            return None
+        return self._shard_manager.state
+
+    @shard_states.setter
+    def shard_states(self, value: torch.Tensor) -> None:
+        """
+        Set the shard states tensor.
+
+        This is called during checkpoint loading to restore the state.
+        """
+        if self._shard_manager is not None:
+            self._shard_manager.state = value
+
+    def construct_reader(self, rank, shard_state):
+        """
+        TODO
+        """
+        # Map rank to underlying shuffled index
+        rank = self._shard_manager.get_shuffled_shard_id(rank)
+        # Fetch relevant HF data shard
+        reader = split_dataset_by_node(self.stream, rank, self.n_logical_shards)
+        d = reader.state_dict()
+        d['examples_iterable']['examples_iterable']['shard_idx'] = shard_state[HFShardField.SHARD_IDX].item()
+        d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[HFShardField.SHARD_EXAMPLE_IDX].item()
+        reader.load_state_dict(d)
+        self.current_stream = reader
+
+    def __iter__(self):
+        self.setup()
+        reader = None
+        has_yielded = False
+        assert len(self.shard_states) > 0 and self._shard_manager.has_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no logical shards!"
+        while True:
+            # Isolate undervisited shards using epoch count field of shard_states
+            epoch_count = self._shard_manager.get_min_epoch()
+            shardset = self._shard_manager.get_shards_with_epoch(epoch_count).tolist()
+            for j,k in enumerate(shardset):
+                # Account for the relocation of each active shard_state
+                # to the end of self.shard_states after it is exhausted
+                i = k-j
+                shardid = self._shard_manager.get_shard_id(i)
+                self.construct_reader(shardid, self.shard_states[i])
+                reader = iter(self.current_stream)
+                # For each shard, iterate through all the remaining docs
+                self.current_shard = i
+                while True:
+                    try:
+                        out = next(reader)
+                        out = self.sample_processor(out)
+                        if out is None:
+                            continue
+                        if out["input_ids"].shape[0] > self.max_seq_len:
+                            print(
+                                f"Rank {self.rank}: Sample length {out["input_ids"].shape[0]} > training {self.max_seq_len}. Skip"
+                            )
+                            continue
+                        yield out
+                        has_yielded = True
+                    except StopIteration:
+                        break
+                # When shard is complete, reset state and clear position tracker
+                self._shard_manager.set_titan_sample_idx(i, 0)
+                # Increase epoch count after finishing shard
+                self._shard_manager.increment_epoch(i)
+                # Prioritize unseen data after rescaling by shifting completed shard to end of shard_states
+                # i.e. shards with (id, epoch_count) [(0,0),(1,1),(2,1),(3,2)] wll produce order:
+                # 0,1,2,0,3,1,2,0,... instead of 0,0,1,2,0,1,2,3,...
+                self._shard_manager.move_shard_to_end(i)
+            
+            # Begin new epoch, and verify that after visiting all shards, some data has been produced
+            assert has_yielded or len(shardset)!=self._shard_manager.count_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
+
+    def state_dict(self):
+        # Write current reader's state into shard state, and packer into packer trackers
+        if self.current_shard != -1:
+            self._shard_manager.set_titan_sample_idx(self.current_shard, self.current_stream._sample_idx)
+            rank = self._shard_manager.get_shard_id(self.current_shard)
+        return super().state_dict()
         
 
 class ScalableHFReader(_StatefulDataset):
@@ -383,7 +525,7 @@ class ScalableHFReader(_StatefulDataset):
         self._shard_manager: Optional[ShardStateManager] = None
 
         self.custom_vars = ["shard_states"]
-        self.custom_fns = [lambda shard_states: shard_rescale(shard_states, self.rank, self.worldsize)]
+        self.custom_fns = [lambda shard_states: epoch_balanced_rescale(shard_states, self.rank, self.worldsize)]
 
     @property
     def shard_states(self) -> torch.Tensor:
@@ -620,7 +762,7 @@ class ScalableReader(_StatefulDataset):
 
         self.broadcast_vars = ["filesizes"]
         self.custom_vars = ["shard_states"]
-        self.custom_fns = [lambda shard_states: shard_rescale(shard_states, self.rank, self.worldsize)]
+        self.custom_fns = [lambda shard_states: epoch_balanced_rescale(shard_states, self.rank, self.worldsize)]
 
     @property
     def shard_states(self) -> torch.Tensor:

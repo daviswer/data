@@ -1,25 +1,46 @@
 """
 Shard rescaling utilities for ScalableReader and ScalableHFReader.
+The states for these classes require more sophisticated handling than DCP's default DTensor sharding,
+so we handle resharding of custom state variables here.
 
-When rescaling to a different number of workers, the logical shard progress counters are aggregated
-globally onto each ScalableReader. Then, completed and incomplete logical shards are re-allocated
-separately, to ensure that each worker receives roughly the same ratio of seen to unseen data in the
-current epoch. This allows us to scale from any number of workers to any other number.
+When rescaling to a different number of workers, custom state variables are aggregated globally onto
+each rank, and rely on these methods to reshard/extract the appropriate state for a given rank. 
+
+As such, these functions are called ONLY when rescaling.
 """
 
-from typing import List
+from typing import Any,List
 
 import torch
 
 from .shard_state import DUMMY_EPOCH, DUMMY_SHARD_ID
 
 
-def shard_rescale(shard_states: List[torch.Tensor], rank: int, worldsize: int) -> torch.Tensor:
+def naive_rescale(shard_states: List[List[Any]], rank: int, worldsize: int) -> List[Any]:
+    """
+    Reproduces DCP's default DTensor behavior, but for lists holding non-tensorable dtypes
+    (such as dicts or other complex data structures). List buffers are concatenated into a single
+    global list, which is then resharded as evenly as possible.
+    """
+    if len(shard_states) == worldsize:
+        # This covers the case where the number of gpus changes, but the number of dataloader
+        # workers does not. In this case, simply pull out the corresponding rank.
+        return shard_states[rank]
+    else:
+        state = sum(shard_states, [])
+        n_items = len(state)
+        start = (rank*n_items)//worldsize
+        end = (rank*n_items+n_items)//worldsize
+        return state[start:end]
+
+
+def epoch_balanced_rescale(shard_states: List[torch.Tensor], rank: int, worldsize: int) -> torch.Tensor:
     """
     Custom function for rescaling of ScalableReader / HFReader shard_states. Logical shards,
     aggregated across workers, are split based on whether they have been visited in the current
     epoch, and each partition is re-allocated across the new worker set such that each new worker
-    receives the same number of visited, unvisited, and total shards (at most off by one).
+    receives the same number of visited, unvisited, and total shards (at most off by one). This
+    ensures that each worker receives roughly the same ratio of seen/unseen data in the current epoch.
     """
     if len(shard_states) == worldsize:
         # This covers the case where the number of gpus changes, but the number of dataloader
