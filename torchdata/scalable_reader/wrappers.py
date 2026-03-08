@@ -525,7 +525,7 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
         return super().state_dict()
     
     def load_state_dict(self, state_dict):
-        print(self.state_dict["custom"].keys())
+        print(state_dict["custom"].keys())
         super().load_state_dict(state_dict)
         # Read shard state into packer's state
         self.packer.sample_buffer = deque(self.packer_buffers_state)
