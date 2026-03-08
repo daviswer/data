@@ -424,7 +424,7 @@ class ScalableMMReader(_StatefulDataset):
         # Map rank to underlying shuffled index
         rank = self._shard_manager.get_shuffled_shard_id(rank)
         # Fetch relevant HF data shard
-        reader = split_dataset_by_node(self.stream, rank, self.n_logical_shards)
+        reader = split_dataset_by_node(self.data, rank, self.n_logical_shards)
         d = reader.state_dict()
         d['examples_iterable']['examples_iterable']['shard_idx'] = shard_state[HFShardField.SHARD_IDX].item()
         d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[HFShardField.SHARD_EXAMPLE_IDX].item()
@@ -465,7 +465,8 @@ class ScalableMMReader(_StatefulDataset):
                     except StopIteration:
                         break
                 # When shard is complete, reset state and clear position tracker
-                self._shard_manager.set_titan_sample_idx(i, 0)
+                self._shard_manager.set_hf_shard_idx(i, 0)
+                self._shard_manager.set_hf_shard_example_idx(i, 0)
                 # Increase epoch count after finishing shard
                 self._shard_manager.increment_epoch(i)
                 # Prioritize unseen data after rescaling by shifting completed shard to end of shard_states
@@ -477,12 +478,19 @@ class ScalableMMReader(_StatefulDataset):
             assert has_yielded or len(shardset)!=self._shard_manager.count_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
 
     def state_dict(self):
-        # Write current reader's state into shard state, and packer into packer trackers
+        # Write current reader's state into shard state
         if self.current_shard != -1:
-            self._shard_manager.set_titan_sample_idx(self.current_shard, self.current_stream._sample_idx)
-            rank = self._shard_manager.get_shard_id(self.current_shard)
+            d = self.current_stream.state_dict()
+            self._shard_manager.set_hf_shard_idx(
+                self.current_shard,
+                d['examples_iterable']['examples_iterable']['shard_idx']
+            )
+            self._shard_manager.set_hf_shard_example_idx(
+                self.current_shard,
+                d['examples_iterable']['examples_iterable']['shard_example_idx']
+            )
         return super().state_dict()
-        
+
 
 class ScalableHFReader(_StatefulDataset):
     """
