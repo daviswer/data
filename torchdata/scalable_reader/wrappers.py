@@ -7,7 +7,7 @@ from typing import Any, Callable, List
 import torch
 
 from .base_loader import _StatefulDataset
-from .shard_rescaler import naive_rescale
+from .shard_rescaler import pickled_list_rescale
 
 
 """
@@ -504,8 +504,8 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
 
         self.custom_vars = ["packer_buffers_state", "packer_samples_state"]
         self.custom_fns = [
-            lambda x: naive_rescale(x, self.rank, self.worldsize),
-            lambda x: naive_rescale(x, self.rank, self.worldsize),
+            lambda x: pickled_list_rescale(x, self.rank, self.worldsize),
+            lambda x: pickled_list_rescale(x, self.rank, self.worldsize),
         ]
 
     def __iter__(self):
@@ -519,14 +519,19 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
                     yield from batch
 
     def state_dict(self):
-        # Write packer's state into shard state
-        self.packer_buffers_state = list(self.packer.sample_buffer)
-        self.packer_samples_state = list(self.packer.packed_samples)
+        # Write packer's state into shard state. Use pickled lists to prevent DCP
+        # from breaking down list-valued states into subvariables with indexed keys
+        self.packer_buffers_state = pickle.saves(list(self.packer.sample_buffer))
+        self.packer_samples_state = pickle.saves(list(self.packer.packed_samples))
         return super().state_dict()
     
     def load_state_dict(self, state_dict):
-        print(state_dict["custom"].keys())
         super().load_state_dict(state_dict)
+        # If not rescaling, unpickle list-valued state vars
+        # Otherwise, let pickled_list_rescale fn do that for us
+        if len(self.packer_buffers_state) == 0:
+            self.packer_buffers_state = pickle.loads(self.packer_buffers_state)
+            self.packer_samples_state = pickle.loads(self.packer_samples_state)
         # Read shard state into packer's state
         self.packer.sample_buffer = deque(self.packer_buffers_state)
         self.packer.packed_samples = deque(self.packer_samples_state)

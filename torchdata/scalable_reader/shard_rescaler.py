@@ -9,6 +9,7 @@ each rank, and rely on these methods to reshard/extract the appropriate state fo
 As such, these functions are called ONLY when rescaling.
 """
 
+import pickle
 from typing import Any,List
 
 import torch
@@ -16,19 +17,20 @@ import torch
 from .shard_state import DUMMY_EPOCH, DUMMY_SHARD_ID
 
 
-def naive_rescale(shard_states: List[List[Any]], rank: int, worldsize: int) -> List[Any]:
+def pickled_list_rescale(shard_states: List[List[Any]], rank: int, worldsize: int) -> List[Any]:
     """
-    Reproduces DCP's default DTensor behavior, but for lists holding non-tensorable dtypes
+    Reproduces DCP's default DTensor behavior, but for pickled lists holding non-tensorable dtypes
     (such as dicts or other complex data structures). List buffers are concatenated into a single
     global list, which is then resharded as evenly as possible.
     """
     if len(shard_states) == worldsize:
         # This covers the case where the number of gpus changes, but the number of dataloader
         # workers does not. In this case, simply pull out the corresponding rank.
-        return shard_states[rank]
+        return pickle.loads(shard_states[rank])
     else:
-        print(f"Rank {rank}: {[len(x) for x in shard_states]}")
-        state = sum(shard_states, [])
+        state = [pickle.loads(x) for x in shard_states]
+        print(f"Rank {rank}: {[len(x) for x in state]}")
+        state = sum(state, [])
         n_items = len(state)
         start = (rank*n_items)//worldsize
         end = (rank*n_items+n_items)//worldsize
