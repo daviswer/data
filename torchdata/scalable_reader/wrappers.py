@@ -521,8 +521,8 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
     def state_dict(self):
         # Write packer's state into shard state. Use pickled lists to prevent DCP
         # from breaking down list-valued states into subvariables with indexed keys
-        self.packer_buffers_state = pickle.saves(list(self.packer.sample_buffer))
-        self.packer_samples_state = pickle.saves(list(self.packer.packed_samples))
+        self.packer_buffers_state = pickle.dumps(list(self.packer.sample_buffer))
+        self.packer_samples_state = pickle.dumps(list(self.packer.packed_samples))
         return super().state_dict()
     
     def load_state_dict(self, state_dict):
