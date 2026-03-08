@@ -422,7 +422,7 @@ class ScalableMMReader(_StatefulDataset):
         TODO
         """
         # Map rank to underlying shuffled index
-        print(f".   Rank {self.rank}: {self.shard_states}, {self._shard_manager.get_shard_id(rank)}")
+        print(f".   Rank {self.rank}: {self.shard_states}, {rank}")
         rank = self._shard_manager.get_shuffled_shard_id(rank)
         # Fetch relevant HF data shard
         reader = split_dataset_by_node(self.data, rank, self.n_logical_shards)
