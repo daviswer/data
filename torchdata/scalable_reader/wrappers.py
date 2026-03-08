@@ -1,4 +1,5 @@
 import os
+from collections import deque
 from copy import deepcopy
 from typing import Any, Callable, List
 
@@ -518,12 +519,12 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
 
     def state_dict(self):
         # Write packer's state into shard state
-        self.packer_buffers_state = self.packer.sample_buffer
-        self.packer_samples_state = self.packer.packed_samples
+        self.packer_buffers_state = list(self.packer.sample_buffer)
+        self.packer_samples_state = list(self.packer.packed_samples)
         return super().state_dict()
     
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         # Read shard state into packer's state
-        self.packer.sample_buffer = self.packer_buffers_state
-        self.packer.packed_samples = self.packer_samples_state
+        self.packer.sample_buffer = deque(self.packer_buffers_state)
+        self.packer.packed_samples = deque(self.packer_samples_state)

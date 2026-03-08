@@ -27,10 +27,12 @@ def naive_rescale(shard_states: List[List[Any]], rank: int, worldsize: int) -> L
         # workers does not. In this case, simply pull out the corresponding rank.
         return shard_states[rank]
     else:
+        print(f"Rank {rank}: {[len(x) for x in state]}")
         state = sum(shard_states, [])
         n_items = len(state)
         start = (rank*n_items)//worldsize
         end = (rank*n_items+n_items)//worldsize
+        print(f"Rank {rank}: {end-start}")
         return state[start:end]
 
 
