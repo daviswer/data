@@ -66,7 +66,6 @@ def load_ckpt_dcp(
     )
     _load_custom_vars(dstate, meta, path, r, nworkers, ckp_ws, ckp_nw, easy_load)
 
-    print(f".   Rank {r}, {dstate}")
     # Reconstruct loader state dict and load
     _finalize_and_load(loader, base, dstate, nworkers)
 
