@@ -504,8 +504,8 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
 
         self.custom_vars = ["packer_buffers_state", "packer_samples_state"]
         self.custom_fns = [
-            lambda x: atomic_rescale(x, self.rank, self.worldsize, sum, []),
-            lambda x: atomic_rescale(x, self.rank, self.worldsize, sum, []),
+            lambda x: atomic_rescale(x, self.rank, self.worldsize),
+            lambda x: atomic_rescale(x, self.rank, self.worldsize),
         ]
 
     def __iter__(self):
