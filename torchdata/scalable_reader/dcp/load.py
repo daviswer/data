@@ -221,7 +221,7 @@ def _load_reshard_vars(
     # Convert from dtensor back to List[tensor]
     # After DCP loads the rank's DTensor, split it back into per-worker tensors
     reshard_vars = {
-        k: v.to_local().local_shards()[0].split(local_split[k])
+        k: v.to_local().local_shards()[0].cpu().split(local_split[k])
         for k, v in reshard_vars.items()
     }
 
