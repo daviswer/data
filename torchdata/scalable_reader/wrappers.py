@@ -376,6 +376,7 @@ class DocPackingDataset(_NestedStatefulDataset):
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         # Convert tensor to nested list
+        print(f".   Rank {self.rank}, {self.bins}")
         self.bins = self.bins.tolist()
 
 
