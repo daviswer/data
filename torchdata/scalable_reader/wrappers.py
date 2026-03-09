@@ -217,7 +217,7 @@ class ShuffleDataset(_NestedStatefulDataset):
         # Write generator state manually
         self.g_state = self.generator.get_state().clone().tolist()
         # Prune buffer so it can be resharded in future
-        self.buffer = torch.tensor(self.buffer[: self.buffer_size], device="cpu")
+        self.buffer = torch.tensor(self.buffer[: self.buffer_size])
         out = super().state_dict()
         # Pad buffer back out again
         self.buffer = self.buffer.tolist()
@@ -229,7 +229,7 @@ class ShuffleDataset(_NestedStatefulDataset):
         self.buffer = self.buffer.tolist()
         # Manually set generator state if it exists
         if self.g_state is not None:
-            self.generator.set_state(torch.tensor(self.g_state, dtype=torch.uint8, device="cpu"))
+            self.generator.set_state(torch.tensor(self.g_state, dtype=torch.uint8))
         # Manually set buffer size
         self.buffer_size = len(self.buffer)
 
@@ -290,7 +290,7 @@ class DocPackingDataset(_NestedStatefulDataset):
 
     def _available_bins(self, targ):
         # Find the bins with enough space to accomodate a chunk of target length
-        slack = torch.tensor(self.bins, device="cpu").eq(self.dummy).flip(dims=(1,)).cumprod(dim=1).sum(dim=1)
+        slack = torch.tensor(self.bins).eq(self.dummy).flip(dims=(1,)).cumprod(dim=1).sum(dim=1)
         n_available = slack.ge(targ).int().sum().item()
         return n_available, slack
 
@@ -313,7 +313,7 @@ class DocPackingDataset(_NestedStatefulDataset):
             n_underfull,slack = self._available_bins(self.npads+1)
             n_yield = len(self.bins) - n_underfull
             if n_yield > 0:
-                self.bins.sort(key=lambda x: torch.tensor(x, device="cpu").eq(self.dummy).flip(dims=(0,)).cumprod(dim=0).sum().neg())
+                self.bins.sort(key=lambda x: torch.tensor(x).eq(self.dummy).flip(dims=(0,)).cumprod(dim=0).sum().neg())
                 n_underfull,slack = self._available_bins(self.npads+1)
                 for i in range(n_yield):
                     # Count forward to flush oldest buckets (of same length) first
@@ -367,7 +367,7 @@ class DocPackingDataset(_NestedStatefulDataset):
 
     def state_dict(self):
         # Convert self.bins to tensor
-        self.bins = torch.tensor(self.bins, device='cpu')
+        self.bins = torch.tensor(self.bins)
         out = super().state_dict()
         # Convert tensor back to nested list
         self.bins = self.bins.tolist()
@@ -376,7 +376,6 @@ class DocPackingDataset(_NestedStatefulDataset):
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         # Convert tensor to nested list
-        print(f".   Rank {self.rank}, {self.bins}")
         self.bins = self.bins.tolist()
 
 
