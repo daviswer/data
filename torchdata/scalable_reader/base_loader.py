@@ -810,7 +810,7 @@ class ScalableReader(_StatefulDataset):
         # shuffle in the algorithm - not default in the system unless asked for.
         shuffled_shard_id = self._shard_manager.get_shuffled_shard_id(shard_id) # can make this optional! also, on file sort in 546
         # Find first doc included in the current shard
-        sizelist = torch.tensor(self.filesizes[1])
+        sizelist = torch.tensor(self.filesizes[1], device="cpu")
         sizelist = sizelist/sizelist.float().sum()
         cum_sizelist = sizelist.cumsum(0)
         start_frac = shuffled_shard_id/nshards
