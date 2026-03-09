@@ -37,7 +37,7 @@ def atomic_rescale(
         start = (rank*n_items)//worldsize
         end = (rank*n_items+n_items)//worldsize
         state = shard_states[start:end]
-        print(f"Rank {rank}: {end-start, n_items}")
+        print(f"Rank {rank}: {start, end, n_items}")
         return state
 
 
