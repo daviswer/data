@@ -7,7 +7,7 @@ from typing import Any, Callable, List
 import torch
 
 from .base_loader import _StatefulDataset
-from .shard_rescaler import pickled_list_rescale
+from .shard_rescaler import atomic_rescale
 
 
 """
@@ -499,13 +499,13 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
         self.packer = packer
 
         # Packer states
-        self.packer_buffers_state = []
-        self.packer_samples_state = []
+        self.packer_buffers_state = None
+        self.packer_samples_state = None
 
         self.custom_vars = ["packer_buffers_state", "packer_samples_state"]
         self.custom_fns = [
-            lambda x: pickled_list_rescale(x, self.rank, self.worldsize),
-            lambda x: pickled_list_rescale(x, self.rank, self.worldsize),
+            lambda x: atomic_rescale(x, self.rank, self.worldsize, sum, []),
+            lambda x: atomic_rescale(x, self.rank, self.worldsize, sum, []),
         ]
 
     def __iter__(self):
@@ -527,11 +527,22 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
     
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
-        # If not rescaling, unpickle list-valued state vars
-        # Otherwise, let pickled_list_rescale fn do that for us
-        if len(self.packer_buffers_state) == 0:
+        if self.packer_buffers_state is None:
+            # If not rescaling, unpickle list-valued state vars
             self.packer_buffers_state = pickle.loads(self.packer_buffers_state)
             self.packer_samples_state = pickle.loads(self.packer_samples_state)
+        else:
+            # If rescaling, pickle_atomic_rescale returns a list of states. 
+            # Extract/merge relevant list entries
+            def list_state_handler(state):
+                if len(state) == 0:
+                    return []
+                elif len(state) == 1:
+                    return state[0]
+                else:
+                    return sum(state, [])
+            self.packer_buffers_state = list_state_handler([pickle.loads(x) for x in self.packer_buffers_state])
+            self.packer_samples_state = list_state_handler([pickle.loads(x) for x in self.packer_samples_state])
         # Read shard state into packer's state
         self.packer.sample_buffer = deque(self.packer_buffers_state)
         self.packer.packed_samples = deque(self.packer_samples_state)

@@ -9,7 +9,7 @@ from .wrappers import PreprocessDataset,ShuffleDataset,DocPackingDataset,Samplin
 from .file_handlers import ShardFileHandler, ArrowHandler, ParquetHandler
 from .dcp_utils import save_ckpt_dcp, load_ckpt_dcp
 from .shard_state import ShardField, HFShardField, DUMMY_SHARD_ID, DUMMY_EPOCH, ShardStateManager
-from .shard_rescaler import pickled_list_rescale, epoch_balanced_rescale
+from .shard_rescaler import atomic_rescale, epoch_balanced_rescale
 
 __all__ = [
     "ScalableReader",
@@ -32,7 +32,7 @@ __all__ = [
     "HFShardField",
     "DUMMY_SHARD_ID",
     "DUMMY_EPOCH",
-    "pickled_list_rescale",
+    "atomic_rescale",
     "epoch_balanced_rescale",
     "ShardStateManager",
 ]
