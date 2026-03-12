@@ -316,7 +316,7 @@ class ScalableHFReader(_StatefulDataset):
                 self._shard_manager.move_shard_to_end(i)
             
             # Begin new epoch, and verify that after visiting all shards, some data has been produced
-            assert has_yielded or len(shardset)!=self._shard_manager.count_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
+            assert has_yielded or len(shardset)!=self._shard_manager.count_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! Shards: {[self._shard_manager.get_shuffled_shard_id(r) for r in self.shard_states[:,0]]}"
 
     def state_dict(self):
         # Write current reader's state into shard state
