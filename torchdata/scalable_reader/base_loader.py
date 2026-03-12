@@ -469,11 +469,6 @@ class ScalableMMReader(_StatefulDataset):
                         out = self.sample_processor(out)
                         if out is None:
                             continue
-                        if out["input_ids"].shape[0] > self.max_seq_len:
-                            print(
-                                f"Rank {self.rank}: Sample length {out['input_ids'].shape[0]} > training {self.max_seq_len}. Skip"
-                            )
-                            continue
                         yield out
                         has_yielded = True
                     except StopIteration:
