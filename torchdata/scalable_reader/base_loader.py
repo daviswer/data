@@ -342,7 +342,7 @@ class ScalableTitanMMReader(_StatefulDataset):
             self.packer_samples = pickle.loads(self.packer_samples_state)
 
 
-class ScalableMMReader(_StatefulDataset):
+class ScalableHFReader(_StatefulDataset):
     """
     TODO
     """
@@ -437,8 +437,21 @@ class ScalableMMReader(_StatefulDataset):
         # Map rank to underlying shuffled index
         print(f".   Rank {self.rank}: {self.shard_states}, {rank}")
         rank = self._shard_manager.get_shuffled_shard_id(rank)
-        # Fetch relevant HF data shard
-        reader = split_dataset_by_node(self.stream, rank, self.n_logical_shards)
+        # Adjust logical shard count to account for physical HF sharding
+        n_physical_shards = self.stream.num_shards
+        if self.n_logical_shards%n_physical_shards != 0:
+            # Round up to nearest multiple of physical shard count, allowing for even distribution
+            self.n_logical_shards = (self.n_logical_shards//n_physical_shards + 1) * n_physical_shards
+        # Fetch relevant physical HF data shard
+        reader = split_dataset_by_node(
+            self.stream,
+            (rank*n_physical_shards)//self.n_logical_shards,
+            n_physical_shards,
+        )
+        # Split physical shard further to get logical shard
+        log_per_phys = self.n_logical_shards//n_physical_shards
+        reader = reader._step(log_per_phys, rank%log_per_phys)
+        # Load in any prior state
         d = reader.state_dict()
         d['examples_iterable']['examples_iterable']['shard_idx'] = shard_state[HFShardField.SHARD_IDX].item()
         d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[HFShardField.SHARD_EXAMPLE_IDX].item()
@@ -500,187 +513,6 @@ class ScalableMMReader(_StatefulDataset):
             )
         return super().state_dict()
 
-
-class ScalableHFReader(_StatefulDataset):
-    """
-    TODO
-    """
-
-    def __init__(
-        self,
-        datapath: str,
-        rank: int,
-        worldsize: int,
-        tokenizer: Tokenizer,
-        delimiter_token: Any,
-        bos_token: Optional[Any] = None,
-        strip_tokens: Optional[Set[Any]] = set(),
-        min_length: int = 1,
-        col_names: List[str] = ["text", "contents", "tokens"],
-        n_logical_shards: int = 30720,
-        seed: int = 42,
-    ):
-        super().__init__(datapath, rank, worldsize)
-        self.datapath = datapath
-        self.tokenizer = tokenizer
-        self.min_length = min_length  # Ignore any docs shorter than this
-        self.eos = delimiter_token  # Inserted between each doc
-        self.bos = bos_token  # Inserted before each doc (optional)
-        self.drop = strip_tokens  # Tokens to drop from begin/end of doc (replaced by above delimiter/bos)
-        self.col_names = col_names  # For each data point, grab first field that matches an entry in this list
-        self.n_logical_shards = n_logical_shards
-        self.seed = seed
-
-        # Setup flags
-        self.stream = None
-
-        # Position
-        self.current_shard = -1
-        self.current_stream = None
-
-        # Shard state manager (initialized in setup)
-        self._shard_manager: Optional[ShardStateManager] = None
-
-        self.custom_vars = ["shard_states"]
-        self.custom_fns = [lambda shard_states: epoch_balanced_rescale(shard_states, self.rank, self.worldsize)]
-
-    @property
-    def shard_states(self) -> torch.Tensor:
-        """
-        Access the shard states tensor.
-
-        This property provides backward compatibility for code that accesses
-        shard_states directly, while delegating to the ShardStateManager.
-        """
-        if self._shard_manager is None:
-            return None
-        return self._shard_manager.state
-
-    @shard_states.setter
-    def shard_states(self, value: torch.Tensor) -> None:
-        """
-        Set the shard states tensor.
-
-        This is called during checkpoint loading to restore the state.
-        """
-        if self._shard_manager is not None:
-            self._shard_manager.state = value
-
-    def setup(self):
-        """
-        Perform any rank- and path-dependent setup. This operation is deferred from __init__
-        to support multiple workers in the dataloader.
-        """
-        if not self.is_setup:
-            # Get your adjusted rank and worldsize
-            super().setup()
-
-            # Initialize shard state manager with adjusted rank/worldsize
-            self._shard_manager = ShardStateManager(
-                n_logical_shards=self.n_logical_shards,
-                rank=self.rank,
-                worldsize=self.worldsize,
-                field_enum=HFShardField,
-                seed=self.seed,
-            )
-            self._shard_manager.initialize()
-
-            # Open HF stream
-            path, name = os.path.split(self.datapath)
-            self.stream = load_dataset(path, name=name, split="train", streaming=True)
-
-    def construct_reader(self, rank, nshards, shard_state):
-        """
-        TODO
-        """
-        # Map rank to underlying shuffled index
-        rank = self._shard_manager.get_shuffled_shard_id(rank)
-        # Fetch relevant HF data shard
-        reader = split_dataset_by_node(self.stream, rank, nshards)
-        d = reader.state_dict()
-        d['examples_iterable']['examples_iterable']['shard_idx'] = shard_state[HFShardField.SHARD_IDX].item()
-        d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[HFShardField.SHARD_EXAMPLE_IDX].item()
-        reader.load_state_dict(d)
-        self.current_stream = reader
-
-    def _process_doc(self, data):
-        """
-        Tokenize doc and handle bos/eos
-        """
-        # Pull out relevant text field
-        doc = None
-        for name in self.col_names:
-            if name in data.keys():
-                doc = data[name]
-                break
-        assert (
-            doc is not None
-        ), f"None of column names {self.col_names} found in file headers {data.keys()}"
-        # Tokenize
-        doc = self.tokenizer.encode(doc)
-        # Truncate first token if needed
-        if len(doc) > 0 and doc[0] in self.drop:
-            doc = doc[1:]
-        # Recheck len for edge case where doc=[eos]
-        if len(doc) > 0 and doc[-1] in self.drop:
-            doc = doc[:-1]
-        # Add bos/eos tokens
-        if self.bos is not None:
-            doc = [self.bos] + doc
-        doc = doc + [self.eos]
-        return doc
-
-    def __iter__(self):
-        self.setup()
-        reader = None
-        has_yielded = False
-        assert len(self.shard_states) > 0 and self._shard_manager.has_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no logical shards!"
-        while True:
-            # Isolate undervisited shards using epoch count field of shard_states
-            epoch_count = self._shard_manager.get_min_epoch()
-            shardset = self._shard_manager.get_shards_with_epoch(epoch_count)
-            for j,k in enumerate(shardset):
-                # Account for the relocation of each active shard_state
-                # to the end of self.shard_states after it is exhausted
-                i = k-j
-                shardid = self._shard_manager.get_shard_id(i)
-                self.construct_reader(shardid, self.n_logical_shards, self.shard_states[i])
-                reader = iter(self.current_stream)
-                # For each shard, iterate through all the remaining docs
-                self.current_shard = i
-                while True:
-                    try:
-                        doc = next(reader)
-                        seq = self._process_doc(doc)
-                        yield seq
-                        has_yielded = True
-                    except StopIteration:
-                        break
-                # When shard is complete, reset state and clear position tracker
-                self._shard_manager.set_hf_shard_idx(i, 0)
-                self._shard_manager.set_hf_shard_example_idx(i, 0)
-                # Increase epoch count after finishing shard
-                self._shard_manager.increment_epoch(i)
-                # Prioritize unseen data after rescaling by shifting completed shard to end of shard_states
-                # i.e. shards with (id, epoch_count) [(0,0),(1,1),(2,1),(3,2)] wll produce order:
-                # 0,1,2,0,3,1,2,0,... instead of 0,0,1,2,0,1,2,3,...
-                self._shard_manager.move_shard_to_end(i)
-            # Begin new epoch, and verify that after visiting all shards, some data has been produced
-            assert has_yielded or len(shardset)!=self._shard_manager.count_valid_shards(), f"Worker {self.rank} of {self.worldsize} in {self.datapath} owns no documents! {self.shard_states}"
-
-    def state_dict(self):
-        # Write current reader's state into shard state
-        if self.current_shard != -1:
-            d = self.current_stream.state_dict()
-            self._shard_manager.set_hf_shard_idx(
-                self.current_shard,
-                d['examples_iterable']['examples_iterable']['shard_idx']
-            )
-            self._shard_manager.set_hf_shard_example_idx(
-                self.current_shard,
-                d['examples_iterable']['examples_iterable']['shard_example_idx']
-            )
-        return super().state_dict()
 
 class ScalableReader(_StatefulDataset):
     """
