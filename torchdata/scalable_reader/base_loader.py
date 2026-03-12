@@ -275,6 +275,8 @@ class ScalableHFReader(_StatefulDataset):
         d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[HFShardField.SHARD_EXAMPLE_IDX].item()
         reader.load_state_dict(d)
         self.current_stream = reader
+        if self.rank==1:
+            print(next(iter(reader)))
 
     def __iter__(self):
         self.setup()
