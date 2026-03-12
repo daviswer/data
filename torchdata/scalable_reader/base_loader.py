@@ -205,6 +205,21 @@ class ScalableHFReader(_StatefulDataset):
             # Get your adjusted rank and worldsize
             super().setup()
 
+            # Open HF stream
+            datakwargs = {}
+            if self.pathsplit:
+                path, name = os.path.split(self.datapath)
+                datakwargs["name"] = name
+            else:
+                path = self.datapath
+            self.stream = self.constructor(path, **datakwargs)
+            
+            # Adjust logical shard count to account for physical HF sharding
+            n_physical_shards = self.stream.num_shards
+            if self.n_logical_shards%n_physical_shards != 0:
+                # Round up to nearest multiple of physical shard count, allowing for even distribution
+                self.n_logical_shards = (self.n_logical_shards//n_physical_shards + 1) * n_physical_shards
+
             # Initialize shard state manager with adjusted rank/worldsize
             self._shard_manager = ShardStateManager(
                 n_logical_shards=self.n_logical_shards,
@@ -214,16 +229,7 @@ class ScalableHFReader(_StatefulDataset):
                 seed=self.seed,
             )
             self._shard_manager.initialize()
-
-            # Open HF stream
-            datakwargs = {}
-            if self.pathsplit:
-                path, name = os.path.split(self.datapath)
-                datakwargs["name"] = name
-            else:
-                path = self.datapath
-            self.stream = self.constructor(path, **datakwargs)
-
+        
     @property
     def shard_states(self) -> torch.Tensor:
         """
@@ -253,12 +259,8 @@ class ScalableHFReader(_StatefulDataset):
         # Map rank to underlying shuffled index
         print(f".   Rank {self.rank}: {self.shard_states}, {rank}")
         rank = self._shard_manager.get_shuffled_shard_id(rank)
-        # Adjust logical shard count to account for physical HF sharding
-        n_physical_shards = self.stream.num_shards
-        if self.n_logical_shards%n_physical_shards != 0:
-            # Round up to nearest multiple of physical shard count, allowing for even distribution
-            self.n_logical_shards = (self.n_logical_shards//n_physical_shards + 1) * n_physical_shards
         # Fetch relevant physical HF data shard
+        n_physical_shards = self.stream.num_shards
         reader = split_dataset_by_node(
             self.stream,
             (rank*n_physical_shards)//self.n_logical_shards,
