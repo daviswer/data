@@ -308,6 +308,8 @@ class ScalableHFReader(_StatefulDataset):
                             yield out
                             has_yielded = True
                     except StopIteration:
+                        if self.rank==1:
+                            print(f"GOTHEREFINALLY: {self._shard_manager.get_shuffled_shard_id(shardid)}, {(shardid*self.stream.num_shards)//self.n_logical_shards}")
                         break
                 # When shard is complete, reset state and clear position tracker
                 self._shard_manager.set_hf_shard_idx(i, 0)
