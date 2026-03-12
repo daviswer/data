@@ -285,8 +285,6 @@ class ScalableHFReader(_StatefulDataset):
             # Isolate undervisited shards using epoch count field of shard_states
             epoch_count = self._shard_manager.get_min_epoch()
             shardset = self._shard_manager.get_shards_with_epoch(epoch_count).tolist()
-            if self.rank==1:
-                print(f"GOTHERE: {self.shard_states}")
             for j,k in enumerate(shardset):
                 # Account for the relocation of each active shard_state
                 # to the end of self.shard_states after it is exhausted
@@ -309,7 +307,7 @@ class ScalableHFReader(_StatefulDataset):
                             has_yielded = True
                     except StopIteration:
                         if self.rank==1:
-                            print(f"GOTHEREFINALLY: {self._shard_manager.get_shuffled_shard_id(shardid)}, {(shardid*self.stream.num_shards)//self.n_logical_shards}")
+                            print(f"GOTHEREFINALLY: {self._shard_manager.get_shuffled_shard_id(shardid)}, {(self._shard_manager.get_shuffled_shard_id(shardid)*self.stream.num_shards)//self.n_logical_shards}, {self.current_stream.__dict__}")
                         break
                 # When shard is complete, reset state and clear position tracker
                 self._shard_manager.set_hf_shard_idx(i, 0)
