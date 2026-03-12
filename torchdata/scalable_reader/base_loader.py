@@ -275,8 +275,6 @@ class ScalableHFReader(_StatefulDataset):
         d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[HFShardField.SHARD_EXAMPLE_IDX].item()
         reader.load_state_dict(d)
         self.current_stream = reader
-        if self.rank==1:
-            print(next(iter(reader)))
 
     def __iter__(self):
         self.setup()
@@ -292,8 +290,6 @@ class ScalableHFReader(_StatefulDataset):
                 # to the end of self.shard_states after it is exhausted
                 i = k-j
                 shardid = self._shard_manager.get_shard_id(i)
-                if self.rank==1:
-                    print(f"GOTHERE: constructing {shardid}, {self._shard_manager.get_shuffled_shard_id(shardid)}, {self.shard_states[i]}")
                 self.construct_reader(shardid, self.shard_states[i])
                 reader = iter(self.current_stream)
                 # For each shard, iterate through all the remaining docs
@@ -302,14 +298,10 @@ class ScalableHFReader(_StatefulDataset):
                     try:
                         out = next(reader)
                         out = self.sample_processor(out)
-                        if self.rank==1:
-                            print(f"GOTHERETOO: {shardid, self._shard_manager.get_shuffled_shard_id(shardid)}")
                         if out is not None:
                             yield out
                             has_yielded = True
                     except StopIteration:
-                        if self.rank==1:
-                            print(f"GOTHEREFINALLY: {self._shard_manager.get_shuffled_shard_id(shardid)}, {(self._shard_manager.get_shuffled_shard_id(shardid)*self.stream.num_shards)//self.n_logical_shards}, {self.current_stream.__dict__}")
                         break
                 # When shard is complete, reset state and clear position tracker
                 self._shard_manager.set_hf_shard_idx(i, 0)
