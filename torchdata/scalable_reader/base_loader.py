@@ -260,13 +260,13 @@ class ScalableHFReader(_StatefulDataset):
         rank = self._shard_manager.get_shuffled_shard_id(rank)
         # Fetch relevant physical HF data shard
         n_physical_shards = self.stream.num_shards
+        log_per_phys = self.n_logical_shards//n_physical_shards
         reader = split_dataset_by_node(
             self.stream,
-            (rank*n_physical_shards)//self.n_logical_shards,
+            rank//log_per_phys,
             n_physical_shards,
         )
         # Split physical shard further to get logical shard
-        log_per_phys = self.n_logical_shards//n_physical_shards
         if log_per_phys > 1:
             reader = reader._step(log_per_phys, rank%log_per_phys)
         # Load in any prior state
