@@ -12,7 +12,7 @@ from .file_handlers import ShardFileHandler
 from .shard_rescaler import epoch_balanced_rescale
 from .shard_state import HFShardField, ShardField, ShardStateManager, TitanMMShardField
 
-from datasets import load_dataset
+from datasets import load_dataset, IterableDataset
 from datasets.distributed import split_dataset_by_node
 from tokenizers import Tokenizer
 
@@ -349,20 +349,24 @@ class ScalableMMReader(_StatefulDataset):
 
     def __init__(
         self,
-        dataset: Any,  # HuggingFaceMultiModalDataset, fully instantiated
+        datapath: str,
         rank: int,
         worldsize: int,
         n_logical_shards: int = 30720,
         sample_processor: Any = lambda x: x,  # fn of single arg for stateless processing of data items
         max_seq_len: int = 131072,
         seed: int = 42,
+        split_path_to_name: bool = False,  # Whether to split off the final entry in datapath as name field of HF load_dataset
+        hf_constructor: Callable[[Any],IterableDataset] = load_dataset,  # Dataset constructor defined up to path (and optionally name)
     ):
-        super().__init__("HFDataset", rank, worldsize)
-        self.data = dataset
+        super().__init__(datapath, rank, worldsize)
         self.n_logical_shards = n_logical_shards
         self.sample_processor = sample_processor
         self.max_seq_len = max_seq_len
         self.seed = seed
+        self.pathsplit = split_path_to_name
+        self.stream = None
+        self.constructor = hf_constructor
 
         # Position
         self.current_shard = -1
@@ -395,6 +399,15 @@ class ScalableMMReader(_StatefulDataset):
             )
             self._shard_manager.initialize()
 
+            # Open HF stream
+            datakwargs = {}
+            if self.pathsplit:
+                path, name = os.path.split(self.datapath)
+                datakwargs["name"] = name
+            else:
+                path = self.datapath
+            self.stream = self.constructor(path, **datakwargs)
+
     @property
     def shard_states(self) -> torch.Tensor:
         """
@@ -425,7 +438,7 @@ class ScalableMMReader(_StatefulDataset):
         print(f".   Rank {self.rank}: {self.shard_states}, {rank}")
         rank = self._shard_manager.get_shuffled_shard_id(rank)
         # Fetch relevant HF data shard
-        reader = split_dataset_by_node(self.data, rank, self.n_logical_shards)
+        reader = split_dataset_by_node(self.stream, rank, self.n_logical_shards)
         d = reader.state_dict()
         d['examples_iterable']['examples_iterable']['shard_idx'] = shard_state[HFShardField.SHARD_IDX].item()
         d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[HFShardField.SHARD_EXAMPLE_IDX].item()
