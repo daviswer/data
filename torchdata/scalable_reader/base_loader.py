@@ -269,7 +269,6 @@ class ScalableHFReader(_StatefulDataset):
         log_per_phys = self.n_logical_shards//n_physical_shards
         if log_per_phys > 1:
             reader = reader._step(log_per_phys, rank%log_per_phys)
-            print(f".   Rank {self.rank}: mapping logical shard {rank} to local positions {(rank*n_physical_shards)//self.n_logical_shards}, {rank%log_per_phys} with {n_physical_shards} shards")
         # Load in any prior state
         d = reader.state_dict()
         d['examples_iterable']['examples_iterable']['shard_idx'] = shard_state[HFShardField.SHARD_IDX].item()
@@ -287,12 +286,14 @@ class ScalableHFReader(_StatefulDataset):
             epoch_count = self._shard_manager.get_min_epoch()
             shardset = self._shard_manager.get_shards_with_epoch(epoch_count).tolist()
             if self.rank==1:
-                print(f"GOTHERE: {shardset}")
+                print(f"GOTHERE: {self.shard_states}")
             for j,k in enumerate(shardset):
                 # Account for the relocation of each active shard_state
                 # to the end of self.shard_states after it is exhausted
                 i = k-j
                 shardid = self._shard_manager.get_shard_id(i)
+                if self.rank==1:
+                    print(f"GOTHERE: constructing {shardid}, {self._shard_manager.get_shuffled_shard_id(shardid)}, {self.shard_states[i]}")
                 self.construct_reader(shardid, self.shard_states[i])
                 reader = iter(self.current_stream)
                 # For each shard, iterate through all the remaining docs
@@ -302,11 +303,10 @@ class ScalableHFReader(_StatefulDataset):
                         out = next(reader)
                         out = self.sample_processor(out)
                         if self.rank==1:
-                            print(f"GOTHERE: {shardid, self._shard_manager.get_shuffled_shard_id(shardid)}")
-                        if out is None:
-                            continue
-                        yield out
-                        has_yielded = True
+                            print(f"GOTHERETOO: {shardid, self._shard_manager.get_shuffled_shard_id(shardid)}")
+                        if out is not None:
+                            yield out
+                            has_yielded = True
                     except StopIteration:
                         break
                 # When shard is complete, reset state and clear position tracker
