@@ -257,7 +257,6 @@ class ScalableHFReader(_StatefulDataset):
         TODO
         """
         # Map rank to underlying shuffled index
-        print(f".   Rank {self.rank}: {self.shard_states}, {rank}")
         rank = self._shard_manager.get_shuffled_shard_id(rank)
         # Fetch relevant physical HF data shard
         n_physical_shards = self.stream.num_shards
@@ -299,6 +298,8 @@ class ScalableHFReader(_StatefulDataset):
                     try:
                         out = next(reader)
                         out = self.sample_processor(out)
+                        if self.rank==1:
+                            print(f"GOTHERE: {shardid, self._shard_manager.get_shuffled_shard_id(shardid)}")
                         if out is None:
                             continue
                         yield out
