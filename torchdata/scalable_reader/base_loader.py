@@ -267,8 +267,9 @@ class ScalableHFReader(_StatefulDataset):
         )
         # Split physical shard further to get logical shard
         log_per_phys = self.n_logical_shards//n_physical_shards
-        reader = reader._step(log_per_phys, rank%log_per_phys)
-        print(f".   Rank {self.rank}: mapping logical shard {rank} to local positions {(rank*n_physical_shards)//self.n_logical_shards}, {rank%log_per_phys} with {n_physical_shards} shards")
+        if log_per_phys > 1:
+            reader = reader._step(log_per_phys, rank%log_per_phys)
+            print(f".   Rank {self.rank}: mapping logical shard {rank} to local positions {(rank*n_physical_shards)//self.n_logical_shards}, {rank%log_per_phys} with {n_physical_shards} shards")
         # Load in any prior state
         d = reader.state_dict()
         d['examples_iterable']['examples_iterable']['shard_idx'] = shard_state[HFShardField.SHARD_IDX].item()
@@ -285,6 +286,8 @@ class ScalableHFReader(_StatefulDataset):
             # Isolate undervisited shards using epoch count field of shard_states
             epoch_count = self._shard_manager.get_min_epoch()
             shardset = self._shard_manager.get_shards_with_epoch(epoch_count).tolist()
+            if self.rank==1:
+                print(f"GOTHERE: {shardset}")
             for j,k in enumerate(shardset):
                 # Account for the relocation of each active shard_state
                 # to the end of self.shard_states after it is exhausted
