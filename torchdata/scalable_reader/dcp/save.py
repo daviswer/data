@@ -55,6 +55,7 @@ def save_ckpt_dcp(
     if rank==0:
         print(dstate["reshard"])
 
+    dist.barrier()
     checkpoint.save(
         dstate,
         storage_writer=checkpoint.FileSystemWriter(path=path),
