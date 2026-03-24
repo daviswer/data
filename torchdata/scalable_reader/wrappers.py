@@ -296,6 +296,8 @@ class DictShuffleDataset(_NestedStatefulDataset):
         self.g_state = None
         self.generator = None
         self.buffer: List[Dict[str, torch.tensor]] = [] 
+        for i in range(n_data_fields):
+            setattr(self, "buffer_"+str(i), [])
         self.data_keys: List[str] = []
         self.buffer_size = 0
         self.state_vars = ["g_state"]
