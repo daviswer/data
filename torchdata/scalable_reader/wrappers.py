@@ -2,7 +2,7 @@ import os
 import pickle
 from collections import deque
 from copy import deepcopy
-from typing import Any, Callable, List
+from typing import Any, Callable, Dict, List
 
 import torch
 
@@ -135,6 +135,38 @@ class PreprocessDataset(_NestedStatefulDataset):
             yield self.aug_fn(out)
 
 
+class CollateDataset(_NestedStatefulDataset):
+    """
+    Wrapper for a _StatefulDataset that applies a specified collation function
+    to dataset outputs.
+    ...
+    Args
+    ----
+    dataset : _StatefulDataset
+        Fully instantiated dataset
+    collate_fn : function (List[any] -> any)
+        The collation function to apply to each group of dataset items
+    batch_size : int
+        The number of items expected by the collator fn
+    """
+
+    def __init__(
+        self,
+        dataset: _StatefulDataset,
+        collate_fn: Callable[[List[Any]],Any],
+        batch_size: int,
+    ):
+        super().__init__(dataset)
+        self.col_fn = collate_fn
+        self.bsize = batch_size
+
+    def __iter__(self):
+        dataset = iter(self.dataset)
+        while True:
+            out = [next(dataset) for _ in range(self.bsize)]
+            yield self.col_fn(out)
+
+
 class ShuffleDataset(_NestedStatefulDataset):
     """
     Wrapper for a StatefulDataset that implements data shuffling via a single in/out buffer.
@@ -230,6 +262,117 @@ class ShuffleDataset(_NestedStatefulDataset):
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         self.buffer = self.buffer.tolist()
+        # Manually set generator state if it exists
+        if self.g_state is not None:
+            self.generator.set_state(torch.tensor(self.g_state, dtype=torch.uint8))
+        # Manually set buffer size
+        self.buffer_size = len(self.buffer)
+
+
+class DictShuffleDataset(_NestedStatefulDataset):
+    """
+    As ShuffleDataset, but for data items that are dicts of torch tensors, rather than python lists.
+    Each key's tensor must have the same shape from item to item.
+    ...
+    Args
+    ----
+    dataset : _StatefulDataset
+        Fully instantiated dataset
+    window_size : int
+        Target size of input/output buffer
+    seed : int
+        Random seed to use for shuffling
+    n_data_fields : int
+        Length of the dictionary comprising each data item
+    """
+
+    def __init__(self, dataset: _StatefulDataset, window_size: int, seed: int=42, n_data_fields: int=1):
+        super().__init__(dataset)
+        assert (
+            window_size > 1
+        ), f"Window size {window_size} must be greater than 1 for shuffling to occur"
+        assert n_data_fields > 0, "Number of dict fields must be greater than 0"
+        self.window_size = window_size
+        self.g_state = None
+        self.generator = None
+        self.buffer: List[Dict[str, torch.tensor]] = [] 
+        self.data_keys: List[str] = []
+        self.buffer_size = 0
+        self.state_vars = ["g_state"]
+        self.broadcast_vars = ["data_keys"]
+        self.reshard_vars = ["buffer_"+str(i) for i in range(n_data_fields)]
+        self.seed = seed
+        self.n_data_fields = n_data_fields
+
+    def setup(self):
+        if not self.is_setup:
+            super().setup()
+            self.generator = torch.Generator().manual_seed(self.rank + self.seed)
+
+    def __iter__(self):
+        self.setup()
+        dataset = iter(self.dataset)
+        # Pad out buffer if needed
+        self._pad_buffer()
+        first_draw = next(dataset)
+        # Record dict fields for state reading/writing
+        self.data_keys = list(first_draw.keys())
+        assert len(first_draw.keys())==self.n_data_fields, f"Num data fields ({len(first_draw.keys())}) does not match specified value ({self.n_data_fields}): {list(first_draw.keys())}"
+        # If buffer entries have wrong length, reset buffer
+        shape_match = True
+        if len(first_draw) != len(self.buffer[0]):
+            shape_match = False
+        else:
+            for k in first_draw.keys():
+                if first_draw[k].shape != self.buffer[0][k].shape:
+                    shape_match = False            
+        if not shape_match:
+            self.buffer = []
+            self.buffer_size = 0
+            self._pad_buffer()
+        while True:
+            # If buffer is undersized, add a datapoint
+            if self.buffer_size < self.window_size:
+                self.buffer[self.buffer_size] = first_draw if first_draw is not None else next(dataset)
+                first_draw = None
+                self.buffer_size += 1
+            # Swap out randomly sampled value from buffer.
+            i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
+            out = self.buffer[i]
+            if self.buffer_size > self.window_size:
+                # If buffer is large, pop last item into the freed slot.
+                self.buffer[i] = self.buffer[self.buffer_size - 1]
+                self.buffer_size -= 1
+            else:
+                # If buffer is small, add new item into the freed slot.
+                self.buffer[i] = first_draw if first_draw is not None else next(dataset)
+                first_draw = None
+            yield out
+
+    def _pad_buffer(self):
+        if len(self.buffer) < self.window_size:
+            self.buffer += [
+                {},
+            ] * (self.window_size - len(self.buffer))
+
+    def state_dict(self):
+        # Create generator if it doesn't already exist
+        self.setup()
+        # Write generator state manually
+        self.g_state = self.generator.get_state().clone().tolist()
+        # Pull buffer fields into reshard vars
+        buffer = self.buffer[:self.buffer_size]
+        for i in range(self.n_data_fields):
+            buffer_i = [x[self.data_keys[i]] for x in buffer]
+            setattr(self, "buffer_"+str(i), buffer_i)
+        out = super().state_dict()
+        return out
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        # Pull individual buffer states into global dict buffer
+        if len(self.data_keys) > 0:
+            self.buffer = [{self.data_keys[j]:getattr(self, "buffer_"+str(j))[i] for j in range(self.n_data_fields)} for i in range(len(self.buffer_0))]
         # Manually set generator state if it exists
         if self.g_state is not None:
             self.generator.set_state(torch.tensor(self.g_state, dtype=torch.uint8))
