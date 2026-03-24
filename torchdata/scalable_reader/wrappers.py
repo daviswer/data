@@ -364,12 +364,12 @@ class DictShuffleDataset(_NestedStatefulDataset):
         self.g_state = self.generator.get_state().clone().tolist()
         # Pull buffer fields into reshard vars
         buffer = self.buffer[:self.buffer_size]
-        if self.rank == 0:
-            print(f".   {self.data_keys, self.buffer[:1]}")
         if len(self.data_keys) > 0:
             for i in range(self.n_data_fields):
                 buffer_i = torch.stack([x[self.data_keys[i]] for x in buffer], dim=0)
                 setattr(self, "buffer_"+str(i), buffer_i)
+            if self.rank == 0:
+                print(f".   {buffer_i.shape}")
         out = super().state_dict()
         return out
 
