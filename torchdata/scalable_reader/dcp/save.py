@@ -52,6 +52,9 @@ def save_ckpt_dcp(
     _prepare_reshard_vars(dstate, state_vars, device_mesh, rank, worldsize)
     _prepare_custom_vars(dstate, rank, nworkers)
 
+    if rank==0:
+        print(dstate["reshard"])
+
     checkpoint.save(
         dstate,
         storage_writer=checkpoint.FileSystemWriter(path=path),
