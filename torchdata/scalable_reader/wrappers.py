@@ -362,7 +362,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
         self.g_state = self.generator.get_state().clone().tolist()
         # Pull buffer fields into reshard vars
         buffer = self.buffer[:self.buffer_size]
-        print(f".   Rank {self.rank}: {self.data_keys, self.buffer[0]}")
+        print(f".   Rank {self.rank}: {self.data_keys, self.buffer[:1]}")
         for i in range(self.n_data_fields):
             buffer_i = [x[self.data_keys[i]] for x in buffer]
             setattr(self, "buffer_"+str(i), buffer_i)
