@@ -40,7 +40,13 @@ def wrap_shardtensor(
     offsets = sizes.cumsum(0).roll(1, 0)
     offsets[0] = 0
     global_shape = [sizes.sum()] + list(x.shape[1:])
-    x = LocalShardsWrapper(local_shards=[x], local_offsets=[(offsets[rank], 0)])
+    x = LocalShardsWrapper(
+        local_shards=[x], 
+        local_offsets=[tuple(
+            [offsets[rank]]
+            +[0]*(len(x.shape)-1)
+        )]
+    )
     x = dtensor.DTensor.from_local(
         local_tensor=x,
         device_mesh=mesh,
