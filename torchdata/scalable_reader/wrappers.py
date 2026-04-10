@@ -3,6 +3,7 @@ from collections import deque, UserList
 from copy import deepcopy
 from typing import Any, Callable, Dict, List
 
+import time
 import torch
 
 from .base_loader import _StatefulDataset
@@ -331,6 +332,10 @@ class DictShuffleDataset(_NestedStatefulDataset):
             self.buffer = []
             self.buffer_size = 0
             self._pad_buffer()
+
+        time.sleep(self.rank)
+        print(self.buffer[:self.buffer_size])
+
         while True:
             # If buffer is undersized, add a datapoint
             if self.buffer_size < self.window_size:
@@ -338,8 +343,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
                 first_draw = None
                 self.buffer_size += 1
             # Swap out randomly sampled value from buffer.
-            # i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
-            i = 0
+            i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
             out = self.buffer[i]
             if self.buffer_size > self.window_size:
                 # If buffer is large, pop last item into the freed slot.
