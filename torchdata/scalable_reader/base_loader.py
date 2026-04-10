@@ -256,6 +256,8 @@ class ScalableHFReader(_StatefulDataset):
         """
         TODO
         """
+        if self.rank==6:
+            print(".   Building reader")
         # Map rank to underlying shuffled index
         rank = self._shard_manager.get_shuffled_shard_id(rank)
         # Fetch relevant physical HF data shard
@@ -275,6 +277,8 @@ class ScalableHFReader(_StatefulDataset):
         d['examples_iterable']['examples_iterable']['shard_example_idx'] = shard_state[HFShardField.SHARD_EXAMPLE_IDX].item()
         reader.load_state_dict(d)
         self.current_stream = reader
+        if self.rank==6:
+            print(".   Built reader")
 
     def __iter__(self):
         self.setup()
@@ -296,12 +300,18 @@ class ScalableHFReader(_StatefulDataset):
                 self.current_shard = i
                 while True:
                     try:
+                        if self.rank==6:
+                            print(".   Calling next data item")
                         out = next(reader)
                         out = self.sample_processor(out)
                         if out is not None:
+                            if self.rank==6:
+                                print(".   Yielding raw item")
                             yield out
                             has_yielded = True
                     except StopIteration:
+                        if self.rank==6:
+                            print(".   File ended")
                         break
                 # When shard is complete, reset state and clear position tracker
                 self._shard_manager.set_hf_shard_idx(i, 0)

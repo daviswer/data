@@ -162,7 +162,11 @@ class CollateDataset(_NestedStatefulDataset):
     def __iter__(self):
         dataset = iter(self.dataset)
         while True:
+            if self.rank==6:
+                print(". Beginning collation")
             out = [next(dataset) for _ in range(self.bsize)]
+            if self.rank==6:
+                print(". Ending collation")
             yield self.col_fn(out)
 
 
