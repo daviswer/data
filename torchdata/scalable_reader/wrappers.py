@@ -332,7 +332,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
             self.buffer_size = 0
             self._pad_buffer()
         while True:
-            yield next(dataset)
+            yield self.buffer[0]
             # # If buffer is undersized, add a datapoint
             # if self.buffer_size < self.window_size:
             #     self.buffer[self.buffer_size] = first_draw if first_draw is not None else next(dataset)
