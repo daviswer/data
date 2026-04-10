@@ -675,6 +675,8 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
         return super().state_dict()
     
     def load_state_dict(self, state_dict):
+        self.packer_buffers_state = None
+        self.packer_samples_state = None
         super().load_state_dict(state_dict)
         if self.packer_buffers_state is None:
             # If not rescaling, unpickle list-valued state vars

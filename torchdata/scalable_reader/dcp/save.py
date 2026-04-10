@@ -52,9 +52,6 @@ def save_ckpt_dcp(
     _prepare_reshard_vars(dstate, state_vars, device_mesh, rank, worldsize)
     _prepare_custom_vars(dstate, rank, nworkers)
 
-    if rank==0:
-        print(dstate["reshard"])
-
     dist.barrier()
     checkpoint.save(
         dstate,
