@@ -350,7 +350,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
                 # If buffer is small, add new item into the freed slot.
                 self.buffer[i] = first_draw if first_draw is not None else next(dataset)
                 first_draw = None
-            print(f".   Rank {self.rank}: yielding")
+            print(f".   Rank {self.rank}: yielding, {self.buffer_size}")
             yield out
 
     def _pad_buffer(self):
