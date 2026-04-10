@@ -332,24 +332,24 @@ class DictShuffleDataset(_NestedStatefulDataset):
             self.buffer_size = 0
             self._pad_buffer()
         while True:
-            yield deepcopy(first_draw)
-            # # If buffer is undersized, add a datapoint
-            # if self.buffer_size < self.window_size:
-            #     self.buffer[self.buffer_size] = first_draw if first_draw is not None else next(dataset)
-            #     first_draw = None
-            #     self.buffer_size += 1
-            # # Swap out randomly sampled value from buffer.
+            # If buffer is undersized, add a datapoint
+            if self.buffer_size < self.window_size:
+                self.buffer[self.buffer_size] = first_draw if first_draw is not None else next(dataset)
+                first_draw = None
+                self.buffer_size += 1
+            # Swap out randomly sampled value from buffer.
             # i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
-            # out = self.buffer[i]
-            # if self.buffer_size > self.window_size:
-            #     # If buffer is large, pop last item into the freed slot.
-            #     self.buffer[i] = self.buffer[self.buffer_size - 1]
-            #     self.buffer_size -= 1
-            # else:
-            #     # If buffer is small, add new item into the freed slot.
-            #     self.buffer[i] = first_draw if first_draw is not None else next(dataset)
-            #     first_draw = None
-            # yield out
+            i = 0
+            out = self.buffer[i]
+            if self.buffer_size > self.window_size:
+                # If buffer is large, pop last item into the freed slot.
+                self.buffer[i] = self.buffer[self.buffer_size - 1]
+                self.buffer_size -= 1
+            else:
+                # If buffer is small, add new item into the freed slot.
+                self.buffer[i] = first_draw if first_draw is not None else next(dataset)
+                first_draw = None
+            yield out
 
     def _pad_buffer(self):
         if len(self.buffer) < self.window_size:
