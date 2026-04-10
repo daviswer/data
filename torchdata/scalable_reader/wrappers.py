@@ -335,9 +335,9 @@ class DictShuffleDataset(_NestedStatefulDataset):
         
         if self.buffer_size == 5:
             for i in range(self.buffer_size):
-                print(f".   Rank {self.rank}: wiping entry {self.buffer_size}")
-                out = deepcopy(self.buffer[self.buffer_size-1])
-                self.buffer[self.buffer_size-1] = {}
+                print(f".   Rank {self.rank}: yielding entry {self.buffer_size}")
+                out = self.buffer[self.buffer_size-1]
+                self.buffer[self.buffer_size-1] = None
                 self.buffer_size -= 1
                 yield out
                 print(f".   Rank {self.rank}: yielding fresh entry")
@@ -367,7 +367,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
     def _pad_buffer(self):
         if len(self.buffer) < self.window_size:
             self.buffer += [
-                {},
+                None,
             ] * (self.window_size - len(self.buffer))
 
     def state_dict(self):
@@ -388,7 +388,10 @@ class DictShuffleDataset(_NestedStatefulDataset):
         super().load_state_dict(state_dict)
         # Pull individual buffer states into global dict buffer
         if len(self.data_keys) > 0:
-            self.buffer = [{self.data_keys[j]:getattr(self, "buffer_"+str(j))[i] for j in range(self.n_data_fields)} for i in range(len(self.buffer_0))]
+            self.buffer = [{self.data_keys[j]:deepcopy(getattr(self, "buffer_"+str(j))[i]) for j in range(self.n_data_fields)} for i in range(len(self.buffer_0))]
+            # Wipe extra buffers
+            for i in range(len(self.data_keys)):
+                setattr(self, "buffer_"+str(i), None)
         # Manually set generator state if it exists
         if self.g_state is not None:
             self.generator.set_state(torch.tensor(self.g_state, dtype=torch.uint8))
