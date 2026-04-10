@@ -1,5 +1,5 @@
 import os
-from collections import deque
+from collections import deque, UserList
 from copy import deepcopy
 from typing import Any, Callable, Dict, List
 
@@ -669,19 +669,15 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
                     yield from batch
 
     def state_dict(self):
-        # Write packer's state into shard state. Use singleton sets to prevent DCP
+        # Write packer's state into shard state. Use UserLists to prevent DCP
         # from breaking down list-valued states into subvariables with indexed keys
-        self.packer_buffers_state = set([list(self.packer.sample_buffer),])  # List for rescaling logic
-        self.packer_samples_state = set([list(self.packer.packed_samples),])
+        self.packer_buffers_state = UserList(self.packer.sample_buffer)
+        self.packer_samples_state = UserList(self.packer.packed_samples)
         return super().state_dict()
     
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
-        if not isinstance(self.packer_buffers_state, List):
-            # If not rescaling, unpack list-valued state vars
-            self.packer_buffers_state = self.packer_buffers_state.pop()
-            self.packer_samples_state = self.packer_samples_state.pop()
-        else:
+        if not isinstance(self.packer_buffers_state, UserList):
             # If rescaling, pickle_atomic_rescale returns a list of states. 
             # Extract/merge relevant list entries
             def list_state_handler(state):
@@ -691,8 +687,8 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
                     return state[0]
                 else:
                     return sum(state, [])
-            self.packer_buffers_state = list_state_handler([x.pop() for x in self.packer_buffers_state])
-            self.packer_samples_state = list_state_handler([x.pop() for x in self.packer_samples_state])
+            self.packer_buffers_state = list_state_handler([x.data for x in self.packer_buffers_state])
+            self.packer_samples_state = list_state_handler([x.data for x in self.packer_samples_state])
         # Read shard state into packer's state
         self.packer.sample_buffer = deque(self.packer_buffers_state)
         self.packer.packed_samples = deque(self.packer_samples_state)
