@@ -1,6 +1,5 @@
 import os
 import pickle
-import pickletools
 from collections import deque
 from copy import deepcopy
 from typing import Any, Callable, Dict, List
@@ -680,9 +679,7 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
         if not isinstance(self.packer_buffers_state, List):
             # If not rescaling, unpickle list-valued state vars
             print(f".   Rank {self.rank}: GOTHERE")
-            # print(f".   Rank {self.rank}: {len(list(self.packer_buffers_state))}")
-            if self.rank==0:
-                pickletools.dis(self.packer_buffers_state)
+            print(f".   Rank {self.rank}: {pickle.loads(self.packer_buffers_state)}")
             self.packer_buffers_state = pickle.loads(self.packer_buffers_state)
             self.packer_samples_state = pickle.loads(self.packer_samples_state)
         else:
