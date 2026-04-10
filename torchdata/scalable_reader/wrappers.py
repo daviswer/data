@@ -661,7 +661,6 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
         dataset = iter(self.dataset)
         while True:
             out = next(dataset)
-            print(f".   Rank {self.rank}: GOTHERE")
             self.packer.add_sample(out)
             if self.packer.has_batch_ready():
                 batch = self.packer.get_next_batch()
