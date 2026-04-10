@@ -332,49 +332,29 @@ class DictShuffleDataset(_NestedStatefulDataset):
             self.buffer = []
             self.buffer_size = 0
             self._pad_buffer()
+        
+        for i in range(self.buffer_size):
+            print(f".   Rank {self.rank}: yielding entry {i}")
+            yield self.buffer[i]
 
-        time.sleep(self.rank)
-        print()
-        print(self.rank)
-        print(self.buffer[:self.buffer_size])
-        print()
-
-        time.sleep(10)
-        print(self.rank, "Yielding...")
-        yield first_draw
-        print(self.rank, "Yielded!")
-
-        time.sleep(self.rank)
-        print(self.rank, "Churning...")
-        for _ in range(10):
-            out = next(dataset)
-        print(self.rank, "Churned!")
-
-        time.sleep(10)
-        print(self.rank, "Yielding churn...")
-        yield out
-        print(self.rank, "Yielded churn!")
-
-
-
-        while True:
-            # If buffer is undersized, add a datapoint
-            if self.buffer_size < self.window_size:
-                self.buffer[self.buffer_size] = first_draw if first_draw is not None else next(dataset)
-                first_draw = None
-                self.buffer_size += 1
-            # Swap out randomly sampled value from buffer.
-            i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
-            out = self.buffer[i]
-            if self.buffer_size > self.window_size:
-                # If buffer is large, pop last item into the freed slot.
-                self.buffer[i] = self.buffer[self.buffer_size - 1]
-                self.buffer_size -= 1
-            else:
-                # If buffer is small, add new item into the freed slot.
-                self.buffer[i] = first_draw if first_draw is not None else next(dataset)
-                first_draw = None
-            yield out
+        # while True:
+        #     # If buffer is undersized, add a datapoint
+        #     if self.buffer_size < self.window_size:
+        #         self.buffer[self.buffer_size] = first_draw or next(dataset)
+        #         first_draw = None
+        #         self.buffer_size += 1
+        #     # Swap out randomly sampled value from buffer.
+        #     i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
+        #     out = self.buffer[i]
+        #     if self.buffer_size > self.window_size:
+        #         # If buffer is large, pop last item into the freed slot.
+        #         self.buffer[i] = self.buffer[self.buffer_size - 1]
+        #         self.buffer_size -= 1
+        #     else:
+        #         # If buffer is small, add new item into the freed slot.
+        #         self.buffer[i] = first_draw or next(dataset)
+        #         first_draw = None
+        #     yield out
 
     def _pad_buffer(self):
         if len(self.buffer) < self.window_size:
