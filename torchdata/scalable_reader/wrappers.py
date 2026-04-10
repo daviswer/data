@@ -332,6 +332,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
             self.buffer = []
             self.buffer_size = 0
             self._pad_buffer()
+        print(f".   Rank {self.rank}: beginning iteration, {len(self.buffer)}, {self.buffer[:self.buffer_size]}")
         while True:
             # If buffer is undersized, add a datapoint
             if self.buffer_size < self.window_size:
