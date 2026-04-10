@@ -162,9 +162,7 @@ class CollateDataset(_NestedStatefulDataset):
     def __iter__(self):
         dataset = iter(self.dataset)
         while True:
-            print(f". Rank {self.rank}: Beginning collation")
             out = [next(dataset) for _ in range(self.bsize)]
-            print(f". Rank {self.rank}: Ending collation")
             yield self.col_fn(out)
 
 
@@ -333,11 +331,9 @@ class DictShuffleDataset(_NestedStatefulDataset):
             self.buffer = []
             self.buffer_size = 0
             self._pad_buffer()
-        print(f"Rank {self.rank}: beginning iteration, {self.buffer_size}")
         while True:
             # If buffer is undersized, add a datapoint
             if self.buffer_size < self.window_size:
-                print(f"Rank {self.rank}: Growing buffer 1 step via new pull")
                 self.buffer[self.buffer_size] = first_draw if first_draw is not None else next(dataset)
                 first_draw = None
                 self.buffer_size += 1
@@ -349,11 +345,9 @@ class DictShuffleDataset(_NestedStatefulDataset):
                 self.buffer[i] = self.buffer[self.buffer_size - 1]
                 self.buffer_size -= 1
             else:
-                print(f"Rank {self.rank}: Performing buffer swapout")
                 # If buffer is small, add new item into the freed slot.
                 self.buffer[i] = first_draw if first_draw is not None else next(dataset)
                 first_draw = None
-            print(f"Rank {self.rank}: yielding, {self.buffer_size}, slot {i}")
             yield out
 
     def _pad_buffer(self):
