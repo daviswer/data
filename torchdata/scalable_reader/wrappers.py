@@ -334,10 +334,9 @@ class DictShuffleDataset(_NestedStatefulDataset):
             self._pad_buffer()
         
         if self.buffer_size == 5:
-            for i in range(4):
-                print(f".   Rank {self.rank}: yielding entry {i}")
-                out = deepcopy(self.buffer[0])
-                self.buffer[0] = self.buffer[self.buffer_size-1]
+            for i in range(self.buffer_size):
+                print(f".   Rank {self.rank}: yielding entry {self.buffer_size}")
+                out = self.buffer[self.buffer_size-1]
                 self.buffer[self.buffer_size-1] = {}
                 self.buffer_size -= 1
                 yield out
