@@ -678,6 +678,8 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
         super().load_state_dict(state_dict)
         if not isinstance(self.packer_buffers_state, List):
             # If not rescaling, unpickle list-valued state vars
+            print(f".   Rank {self.rank}: GOTHERE")
+            print(f".   Rank {self.rank}: {len(list(self.packer_buffers_state))}")
             self.packer_buffers_state = pickle.loads(self.packer_buffers_state)
             self.packer_samples_state = pickle.loads(self.packer_samples_state)
         else:
