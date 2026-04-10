@@ -338,10 +338,23 @@ class DictShuffleDataset(_NestedStatefulDataset):
         print(self.rank)
         print(self.buffer[:self.buffer_size])
         print()
-        time.sleep(10+4*self.rank)
+
+        time.sleep(10)
+        print(self.rank, "Yielding...")
+        yield first_draw
+        print(self.rank, "Yielded!")
+
+        time.sleep(self.rank)
         print(self.rank, "Churning...")
-        [next(dataset) for i in range(50)]
+        for _ in range(10):
+            out = next(dataset)
         print(self.rank, "Churned!")
+
+        time.sleep(10)
+        print(self.rank, "Yielding churn...")
+        yield out
+        print(self.rank, "Yielded churn!")
+
 
 
         while True:
