@@ -678,10 +678,10 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
         super().load_state_dict(state_dict)
         if not isinstance(self.packer_buffers_state, List):
             # If not rescaling, unpickle list-valued state vars
-            print(f".   Rank {self.rank}: GOTHERE")
-            print(f".   Rank {self.rank}: {pickle.loads(self.packer_buffers_state)}")
+            print(f".   Rank {self.rank}: Unpickling")
             self.packer_buffers_state = pickle.loads(self.packer_buffers_state)
             self.packer_samples_state = pickle.loads(self.packer_samples_state)
+            print(f".   Rank {self.rank}: Unpickled")
         else:
             # If rescaling, pickle_atomic_rescale returns a list of states. 
             # Extract/merge relevant list entries
@@ -695,5 +695,7 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
             self.packer_buffers_state = list_state_handler([pickle.loads(x) for x in self.packer_buffers_state])
             self.packer_samples_state = list_state_handler([pickle.loads(x) for x in self.packer_samples_state])
         # Read shard state into packer's state
+        print(f".   Rank {self.rank}: Loading")
         self.packer.sample_buffer = deque(self.packer_buffers_state)
         self.packer.packed_samples = deque(self.packer_samples_state)
+        print(f".   Rank {self.rank}: Loaded")
