@@ -333,9 +333,12 @@ class DictShuffleDataset(_NestedStatefulDataset):
             self.buffer_size = 0
             self._pad_buffer()
         
-        for i in range(self.buffer_size):
-            print(f".   Rank {self.rank}: yielding entry {i}")
-            yield self.buffer[i]
+        if self.buffer_size == 5:
+            for i in range(self.buffer_size):
+                print(f".   Rank {self.rank}: yielding entry {i}")
+                yield self.buffer[i]
+        else:
+            yield next(dataset)
 
         # while True:
         #     # If buffer is undersized, add a datapoint
