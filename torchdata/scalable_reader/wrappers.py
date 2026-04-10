@@ -683,6 +683,7 @@ class TitanMMPackingDataset(_NestedStatefulDataset):
             self.packer_buffers_state = pickle.loads(self.packer_buffers_state)
             self.packer_samples_state = pickle.loads(self.packer_samples_state)
         else:
+            print(self.packer_buffers_state)
             # If rescaling, pickle_atomic_rescale returns a list of states. 
             # Extract/merge relevant list entries
             def list_state_handler(state):
