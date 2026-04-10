@@ -388,9 +388,9 @@ class DictShuffleDataset(_NestedStatefulDataset):
         # Pull individual buffer states into global dict buffer
         if len(self.data_keys) > 0:
             self.buffer = [{self.data_keys[j]:getattr(self, "buffer_"+str(j))[i] for j in range(self.n_data_fields)} for i in range(len(self.buffer_0))]
-            # Wipe extra buffers
-            for i in range(len(self.data_keys)):
-                setattr(self, "buffer_"+str(i), None)
+            # # Wipe extra buffers
+            # for i in range(len(self.data_keys)):
+            #     setattr(self, "buffer_"+str(i), None)
         # Manually set generator state if it exists
         if self.g_state is not None:
             self.generator.set_state(torch.tensor(self.g_state, dtype=torch.uint8))
