@@ -336,10 +336,10 @@ class DictShuffleDataset(_NestedStatefulDataset):
         if self.buffer_size == 5:
             for i in range(self.buffer_size):
                 print(f".   Rank {self.rank}: wiping entry {self.buffer_size}")
-                # out = self.buffer[self.buffer_size-1]
+                out = deepcopy(self.buffer[self.buffer_size-1])
                 self.buffer[self.buffer_size-1] = {}
                 self.buffer_size -= 1
-                # yield out
+                yield out
                 print(f".   Rank {self.rank}: yielding fresh entry")
                 yield next(dataset)
         while True:
@@ -377,7 +377,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
         self.g_state = self.generator.get_state().clone().tolist()
         # Pull buffer fields into reshard vars
         buffer = self.buffer[:self.buffer_size]
-        if len(self.data_keys) > 0:
+        if len(self.data_keys) > 0 and self.buffer_size > 0:
             for i in range(self.n_data_fields):
                 buffer_i = torch.stack([x[self.data_keys[i]] for x in buffer], dim=0)
                 setattr(self, "buffer_"+str(i), buffer_i)
