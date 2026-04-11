@@ -332,14 +332,14 @@ class DictShuffleDataset(_NestedStatefulDataset):
         self.buffer = [buffer[i] for i in range(len(buffer))]
         if len(self.buffer) > 0:
             for i in range(len(self.buffer)):
-                print(f".   Rank {self.rank}: yielding entry {i}")
+                print(f"Rank {self.rank}: yielding entry {i}")
                 # self.buffer[0], self.buffer[-1] = self.buffer[-1], self.buffer[0]
                 # self.buffer_size -= 1
                 # yield deepcopy(self.buffer[i])
                 out = self.buffer.pop(i)
                 self.buffer.append(next(dataset))
                 yield out
-                print(f".   Rank {self.rank}: yielding fresh entry")
+                print(f"Rank {self.rank}: yielding fresh entry")
                 yield next(dataset)
         while True:
             yield next(dataset)
@@ -365,6 +365,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
         buffer = self.buffer
         if len(self.data_keys) > 0 and len(self.buffer) > 0:
             for i in range(self.n_data_fields):
+                print(f".       Rank {self.rank} gathering {i}: {self.data_keys[i]}, {buffer[0][self.data_keys[i]].shape}")
                 buffer_i = torch.stack([x[self.data_keys[i]] for x in buffer], dim=0)
                 setattr(self, "buffer_"+str(i), buffer_i)
         print(f".   Rank {self.rank} assembled")
