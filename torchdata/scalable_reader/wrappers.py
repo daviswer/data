@@ -369,7 +369,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
         super().load_state_dict(state_dict)
         # Pull individual buffer states into global dict buffer
         if len(self.data_keys) > 0:
-            self.buffer = [{self.data_keys[j]:getattr(self, "buffer_"+str(j))[i] for j in range(self.n_data_fields)} for i in range(len(self.buffer_0))]
+            self.buffer = [{self.data_keys[j]:getattr(self, "buffer_"+str(j))[i].clone() for j in range(self.n_data_fields)} for i in range(len(self.buffer_0))]
             # Wipe extra buffers
             for i in range(len(self.data_keys)):
                 setattr(self, "buffer_"+str(i), None)
