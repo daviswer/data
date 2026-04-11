@@ -328,13 +328,15 @@ class DictShuffleDataset(_NestedStatefulDataset):
         if not shape_match:
             self.buffer = []
         
-        if len(self.buffer) > 0:
-            for i in range(len(self.buffer)):
+        buffer = {i:self.buffer[i] for i in range(len(self.buffer))}
+        self.buffer = []
+        if len(buffer) > 0:
+            for i in range(len(buffer)):
                 print(f".   Rank {self.rank}: yielding entry {i}")
                 # self.buffer[0], self.buffer[-1] = self.buffer[-1], self.buffer[0]
                 # self.buffer_size -= 1
                 # yield deepcopy(self.buffer[i])
-                yield self.buffer.pop()
+                yield buffer.pop(i)
                 print(f".   Rank {self.rank}: yielding fresh entry")
                 yield next(dataset)
         while True:
@@ -369,7 +371,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
         super().load_state_dict(state_dict)
         # Pull individual buffer states into global dict buffer
         if len(self.data_keys) > 0:
-            self.buffer = [{self.data_keys[j]:getattr(self, "buffer_"+str(j))[i].clone() for j in range(self.n_data_fields)} for i in range(len(self.buffer_0))]
+            self.buffer = [{self.data_keys[j]:getattr(self, "buffer_"+str(j))[i] for j in range(self.n_data_fields)} for i in range(len(self.buffer_0))]
             # Wipe extra buffers
             for i in range(len(self.data_keys)):
                 setattr(self, "buffer_"+str(i), None)
