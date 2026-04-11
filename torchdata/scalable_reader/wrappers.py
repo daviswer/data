@@ -299,7 +299,6 @@ class DictShuffleDataset(_NestedStatefulDataset):
         for i in range(n_data_fields):
             setattr(self, "buffer_"+str(i), [])
         self.data_keys: List[str] = []
-        self.buffer_size = 0
         self.state_vars = ["g_state"]
         self.broadcast_vars = ["data_keys"]
         self.reshard_vars = ["buffer_"+str(i) for i in range(n_data_fields)]
@@ -314,15 +313,13 @@ class DictShuffleDataset(_NestedStatefulDataset):
     def __iter__(self):
         self.setup()
         dataset = iter(self.dataset)
-        # Pad out buffer if needed
-        self._pad_buffer()
         first_draw = next(dataset)
         # Record dict fields for state reading/writing
         self.data_keys = list(first_draw.keys())
         assert len(first_draw.keys())==self.n_data_fields, f"Num data fields ({len(first_draw.keys())}) does not match specified value ({self.n_data_fields}): {list(first_draw.keys())}"
         # If buffer entries have wrong length, reset buffer
         shape_match = True
-        if len(first_draw) != len(self.buffer[0]):
+        if len(self.buffer)==0 or len(first_draw) != len(self.buffer[0]):
             shape_match = False
         else:
             for k in first_draw.keys():
@@ -330,8 +327,6 @@ class DictShuffleDataset(_NestedStatefulDataset):
                     shape_match = False            
         if not shape_match:
             self.buffer = []
-            self.buffer_size = 0
-            self._pad_buffer()
         
         # if self.buffer_size == 5:
         #     for i in range(self.buffer_size):
@@ -345,29 +340,15 @@ class DictShuffleDataset(_NestedStatefulDataset):
         #     yield next(dataset)
 
         while True:
-            # If buffer is undersized, add a datapoint
-            if self.buffer_size < self.window_size:
-                self.buffer[self.buffer_size] = first_draw or next(dataset)
-                first_draw = None
-                self.buffer_size += 1
+            # If buffer is undersized, add up to two datapoints
+            for _ in range(2):
+                if self.buffer_size < self.window_size:
+                    self.buffer.append(first_draw or next(dataset))
+                    first_draw = None
             # Swap out randomly sampled value from buffer.
-            i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
-            out = self.buffer[i]
-            if self.buffer_size > self.window_size:
-                # If buffer is large, pop last item into the freed slot.
-                self.buffer[i] = self.buffer[self.buffer_size - 1]
-                self.buffer_size -= 1
-            else:
-                # If buffer is small, add new item into the freed slot.
-                self.buffer[i] = first_draw or next(dataset)
-                first_draw = None
-            yield out
-
-    def _pad_buffer(self):
-        if len(self.buffer) < self.window_size:
-            self.buffer += [
-                None,
-            ] * (self.window_size - len(self.buffer))
+            i = torch.randint(len(self.buffer), (1,), generator=self.generator).item()
+            self.buffer[-1], self.buffer[i] = self.buffer[i], self.buffer[-1]
+            yield self.buffer.pop()
 
     def state_dict(self):
         # Create generator if it doesn't already exist
@@ -375,8 +356,8 @@ class DictShuffleDataset(_NestedStatefulDataset):
         # Write generator state manually
         self.g_state = self.generator.get_state().clone().tolist()
         # Pull buffer fields into reshard vars
-        buffer = self.buffer[:self.buffer_size]
-        if len(self.data_keys) > 0 and self.buffer_size > 0:
+        buffer = self.buffer
+        if len(self.data_keys) > 0 and len(self.buffer) > 0:
             for i in range(self.n_data_fields):
                 buffer_i = torch.stack([x[self.data_keys[i]] for x in buffer], dim=0)
                 setattr(self, "buffer_"+str(i), buffer_i)
@@ -394,8 +375,6 @@ class DictShuffleDataset(_NestedStatefulDataset):
         # Manually set generator state if it exists
         if self.g_state is not None:
             self.generator.set_state(torch.tensor(self.g_state, dtype=torch.uint8))
-        # Manually set buffer size
-        self.buffer_size = len(self.buffer)
 
 
 class DocPackingDataset(_NestedStatefulDataset):
