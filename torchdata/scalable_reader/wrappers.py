@@ -315,7 +315,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
         self.setup()
         dataset = iter(self.dataset)
         # Pad out buffer if needed
-        # self._pad_buffer()
+        self._pad_buffer()
         first_draw = next(dataset)
         # Record dict fields for state reading/writing
         self.data_keys = list(first_draw.keys())
@@ -331,37 +331,37 @@ class DictShuffleDataset(_NestedStatefulDataset):
         if not shape_match:
             self.buffer = []
             self.buffer_size = 0
-            # self._pad_buffer()
+            self._pad_buffer()
         
-        if self.buffer_size == 5:
-            for i in range(self.buffer_size):
-                print(f".   Rank {self.rank}: yielding entry {i}")
-                # self.buffer[0], self.buffer[-1] = self.buffer[-1], self.buffer[0]
-                # self.buffer_size -= 1
-                yield deepcopy(self.buffer[i])
-                # print(f".   Rank {self.rank}: yielding fresh entry")
-                # yield next(dataset)
-        while True:
-            yield next(dataset)
-
+        # if self.buffer_size == 5:
+        #     for i in range(self.buffer_size):
+        #         print(f".   Rank {self.rank}: yielding entry {i}")
+        #         # self.buffer[0], self.buffer[-1] = self.buffer[-1], self.buffer[0]
+        #         # self.buffer_size -= 1
+        #         yield deepcopy(self.buffer[i])
+        #         # print(f".   Rank {self.rank}: yielding fresh entry")
+        #         # yield next(dataset)
         # while True:
-        #     # If buffer is undersized, add a datapoint
-        #     if self.buffer_size < self.window_size:
-        #         self.buffer[self.buffer_size] = first_draw or next(dataset)
-        #         first_draw = None
-        #         self.buffer_size += 1
-        #     # Swap out randomly sampled value from buffer.
-        #     i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
-        #     out = self.buffer[i]
-        #     if self.buffer_size > self.window_size:
-        #         # If buffer is large, pop last item into the freed slot.
-        #         self.buffer[i] = self.buffer[self.buffer_size - 1]
-        #         self.buffer_size -= 1
-        #     else:
-        #         # If buffer is small, add new item into the freed slot.
-        #         self.buffer[i] = first_draw or next(dataset)
-        #         first_draw = None
-        #     yield out
+        #     yield next(dataset)
+
+        while True:
+            # If buffer is undersized, add a datapoint
+            if self.buffer_size < self.window_size:
+                self.buffer[self.buffer_size] = first_draw or next(dataset)
+                first_draw = None
+                self.buffer_size += 1
+            # Swap out randomly sampled value from buffer.
+            i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
+            out = self.buffer[i]
+            if self.buffer_size > self.window_size:
+                # If buffer is large, pop last item into the freed slot.
+                self.buffer[i] = self.buffer[self.buffer_size - 1]
+                self.buffer_size -= 1
+            else:
+                # If buffer is small, add new item into the freed slot.
+                self.buffer[i] = first_draw or next(dataset)
+                first_draw = None
+            yield out
 
     def _pad_buffer(self):
         if len(self.buffer) < self.window_size:
