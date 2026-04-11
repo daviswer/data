@@ -328,27 +328,27 @@ class DictShuffleDataset(_NestedStatefulDataset):
         if not shape_match:
             self.buffer = []
         
-        # if self.buffer_size == 5:
-        #     for i in range(self.buffer_size):
-        #         print(f".   Rank {self.rank}: yielding entry {i}")
-        #         # self.buffer[0], self.buffer[-1] = self.buffer[-1], self.buffer[0]
-        #         # self.buffer_size -= 1
-        #         yield deepcopy(self.buffer[i])
-        #         # print(f".   Rank {self.rank}: yielding fresh entry")
-        #         # yield next(dataset)
-        # while True:
-        #     yield next(dataset)
-
+        if len(self.buffer) > 0:
+            for i in range(len(self.buffer)):
+                print(f".   Rank {self.rank}: yielding entry {i}")
+                # self.buffer[0], self.buffer[-1] = self.buffer[-1], self.buffer[0]
+                # self.buffer_size -= 1
+                yield deepcopy(self.buffer[i])
+                print(f".   Rank {self.rank}: yielding fresh entry")
+                yield next(dataset)
         while True:
-            # If buffer is undersized, add up to two datapoints
-            for _ in range(2):
-                if len(self.buffer) < self.window_size:
-                    self.buffer.append(first_draw or next(dataset))
-                    first_draw = None
-            # Swap out randomly sampled value from buffer.
-            i = torch.randint(len(self.buffer), (1,), generator=self.generator).item()
-            self.buffer[-1], self.buffer[i] = self.buffer[i], self.buffer[-1]
-            yield self.buffer.pop()
+            yield next(dataset)
+
+        # while True:
+        #     # If buffer is undersized, add up to two datapoints
+        #     for _ in range(2):
+        #         if len(self.buffer) < self.window_size:
+        #             self.buffer.append(first_draw or next(dataset))
+        #             first_draw = None
+        #     # Swap out randomly sampled value from buffer.
+        #     i = torch.randint(len(self.buffer), (1,), generator=self.generator).item()
+        #     self.buffer[-1], self.buffer[i] = self.buffer[i], self.buffer[-1]
+        #     yield self.buffer.pop()
 
     def state_dict(self):
         # Create generator if it doesn't already exist
