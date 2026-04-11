@@ -329,6 +329,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
             self.buffer = []
         
         buffer = {i:self.buffer[i] for i in range(len(self.buffer))}
+        self.buffer = []
         self.buffer2 = []
         if len(buffer) > 0:
             for i in range(len(buffer)):
