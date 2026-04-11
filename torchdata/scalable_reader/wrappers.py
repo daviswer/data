@@ -339,8 +339,10 @@ class DictShuffleDataset(_NestedStatefulDataset):
                 out = self.buffer.pop(i)
                 self.buffer.append(next(dataset))
                 yield out
+                time.sleep(1)
                 print(f"Rank {self.rank}: yielding fresh entry")
                 yield next(dataset)
+                time.sleep(1)
         while True:
             yield next(dataset)
 
@@ -362,7 +364,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
         self.g_state = self.generator.get_state().clone().tolist()
         # Pull buffer fields into reshard vars
         print(f".   Rank {self.rank} assembling")
-        buffer = deepcopy(self.buffer)
+        buffer = self.buffer
         if len(self.data_keys) > 0 and len(self.buffer) > 0:
             for i in range(self.n_data_fields):
                 print(f".       Rank {self.rank} gathering {i}: {self.data_keys[i]}, {buffer[0][self.data_keys[i]].shape}")
