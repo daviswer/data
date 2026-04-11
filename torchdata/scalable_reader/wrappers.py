@@ -362,7 +362,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
         self.g_state = self.generator.get_state().clone().tolist()
         # Pull buffer fields into reshard vars
         print(f".   Rank {self.rank} assembling")
-        buffer = self.buffer
+        buffer = deepcopy(self.buffer)
         if len(self.data_keys) > 0 and len(self.buffer) > 0:
             for i in range(self.n_data_fields):
                 print(f".       Rank {self.rank} gathering {i}: {self.data_keys[i]}, {buffer[0][self.data_keys[i]].shape}")
