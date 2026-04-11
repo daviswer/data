@@ -342,7 +342,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
         while True:
             # If buffer is undersized, add up to two datapoints
             for _ in range(2):
-                if self.buffer_size < self.window_size:
+                if len(self.buffer) < self.window_size:
                     self.buffer.append(first_draw or next(dataset))
                     first_draw = None
             # Swap out randomly sampled value from buffer.
