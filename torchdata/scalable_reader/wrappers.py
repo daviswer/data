@@ -339,8 +339,8 @@ class DictShuffleDataset(_NestedStatefulDataset):
                 # self.buffer[0], self.buffer[-1] = self.buffer[-1], self.buffer[0]
                 # self.buffer_size -= 1
                 yield deepcopy(self.buffer[i])
-                print(f".   Rank {self.rank}: yielding fresh entry")
-                yield next(dataset)
+                # print(f".   Rank {self.rank}: yielding fresh entry")
+                # yield next(dataset)
         while True:
             yield next(dataset)
 
