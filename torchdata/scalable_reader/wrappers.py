@@ -361,13 +361,15 @@ class DictShuffleDataset(_NestedStatefulDataset):
         # Write generator state manually
         self.g_state = self.generator.get_state().clone().tolist()
         # Pull buffer fields into reshard vars
-        print("GOTHERE")
+        print(f".   Rank {self.rank} assembling")
         buffer = self.buffer
         if len(self.data_keys) > 0 and len(self.buffer) > 0:
             for i in range(self.n_data_fields):
                 buffer_i = torch.stack([x[self.data_keys[i]] for x in buffer], dim=0)
                 setattr(self, "buffer_"+str(i), buffer_i)
+        print(f".   Rank {self.rank} assembled")
         out = super().state_dict()
+        print(f".   Rank {self.rank} compiled")
         return out
 
     def load_state_dict(self, state_dict):
