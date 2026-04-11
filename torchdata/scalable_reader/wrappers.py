@@ -361,6 +361,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
         # Write generator state manually
         self.g_state = self.generator.get_state().clone().tolist()
         # Pull buffer fields into reshard vars
+        print("GOTHERE")
         buffer = self.buffer
         if len(self.data_keys) > 0 and len(self.buffer) > 0:
             for i in range(self.n_data_fields):
