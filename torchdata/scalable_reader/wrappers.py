@@ -323,6 +323,9 @@ class DictShuffleDataset(_NestedStatefulDataset):
 
     def _buffer(self, i):
         return getattr(self, "buffer_"+str(i))
+    
+    def print(self, s):
+        print(f".   Rank {self.rank}: "+s)
 
     def __iter__(self):
         self.setup()
@@ -339,13 +342,16 @@ class DictShuffleDataset(_NestedStatefulDataset):
             for i in range(self.n_data_fields):
                 if first_draw[self.data_keys[i]].shape != self._buffer(i)[0].shape:
                     shape_match = False
+        self.print(f"Shape check finished {shape_match}")
         if not shape_match:
             self.buffer_size = 0
             for i in range(self.n_data_fields):
                 setattr(self, "buffer_"+str(i), torch.stack([first_draw[self.data_keys[i]],]*self.window_size, dim=0))
+                self.print(f"Buffer {self.data_keys[i]} created")
 
         while True:
             # If buffer is undersized, add up to two datapoints
+            self.print("Pulling new entries")
             for _ in range(2):
                 if self.buffer_size < self.window_size:
                     d = first_draw or next(dataset)
@@ -354,9 +360,11 @@ class DictShuffleDataset(_NestedStatefulDataset):
                     self.buffer_size += 1
             # Pull out randomly sampled entry from buffer, replace with latest
             i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
+            self.print("Swapping")
             out = self._get(i)
             self._set(i, self._get(self.buffer_size-1))
             self.buffer_size -= 1
+            self.print(f"Yielding {i}")
             yield out
 
     def state_dict(self):
