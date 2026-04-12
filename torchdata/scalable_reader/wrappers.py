@@ -327,24 +327,6 @@ class DictShuffleDataset(_NestedStatefulDataset):
                     shape_match = False            
         if not shape_match:
             self.buffer = []
-        
-        # buffer = {i:self.buffer[i] for i in range(len(self.buffer))}
-        # self.buffer = [buffer[i] for i in range(len(buffer))]
-        # if len(self.buffer) > 0:
-        #     for i in range(len(self.buffer)):
-        #         print(f"Rank {self.rank}: yielding entry {i}")
-        #         # self.buffer[0], self.buffer[-1] = self.buffer[-1], self.buffer[0]
-        #         # self.buffer_size -= 1
-        #         # yield deepcopy(self.buffer[i])
-        #         out = self.buffer.pop(i)
-        #         self.buffer.append(next(dataset))
-        #         yield out
-        #         time.sleep(1)
-        #         print(f"Rank {self.rank}: yielding fresh entry")
-        #         yield next(dataset)
-        #         time.sleep(1)
-        # while True:
-        #     yield next(dataset)
 
         while True:
             # If buffer is undersized, add up to two datapoints
@@ -356,7 +338,9 @@ class DictShuffleDataset(_NestedStatefulDataset):
             i = torch.randint(len(self.buffer), (1,), generator=self.generator).item()
             self.buffer[-1], self.buffer[i] = self.buffer[i], self.buffer[-1]
             yield self.buffer.pop()
-            time.sleep(2)
+            time.sleep(2)  
+            # Above is currently necessary to prevent segfaults in state_dict calls
+            # Effectively a lock on self.buffer
 
     def state_dict(self):
         # Create generator if it doesn't already exist
@@ -364,16 +348,12 @@ class DictShuffleDataset(_NestedStatefulDataset):
         # Write generator state manually
         self.g_state = self.generator.get_state().clone().tolist()
         # Pull buffer fields into reshard vars
-        print(f".   Rank {self.rank} assembling")
         buffer = self.buffer
         if len(self.data_keys) > 0 and len(self.buffer) > 0:
             for i in range(self.n_data_fields):
-                print(f".       Rank {self.rank} gathering {i}: {self.data_keys[i]}, {buffer[0][self.data_keys[i]].shape}")
                 buffer_i = torch.stack([x[self.data_keys[i]] for x in buffer], dim=0)
                 setattr(self, "buffer_"+str(i), buffer_i)
-        print(f".   Rank {self.rank} assembled")
         out = super().state_dict()
-        print(f".   Rank {self.rank} compiled")
         return out
 
     def load_state_dict(self, state_dict):
