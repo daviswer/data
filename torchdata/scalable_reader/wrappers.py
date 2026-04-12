@@ -295,9 +295,8 @@ class DictShuffleDataset(_NestedStatefulDataset):
         self.window_size = window_size
         self.g_state = None
         self.generator = None
-        self.buffer_size = 0
         for i in range(n_data_fields):
-            setattr(self, "buffer_"+str(i), torch.zeros(window_size,1))
+            setattr(self, "buffer_"+str(i), torch.zeros(window_size))
         self.data_keys: List[str] = []
         self.state_vars = ["g_state"]
         self.broadcast_vars = ["data_keys"]
@@ -316,13 +315,21 @@ class DictShuffleDataset(_NestedStatefulDataset):
         return {self.data_keys[j]:self._buffer(j)[i] for j in range(self.n_data_fields)}
     
     def _set(self, i, d):
-        assert i <= self.buffer_size, f"Specified index {i} exceeds current buffer length {self.buffer_size}"
+        bsize = self.buffer_size
+        assert i <= bsize, f"Specified index {i} exceeds current buffer length {bsize}"
         for j,k in enumerate(self.data_keys):
             b = self._buffer(j)
-            b[i] = d[k]
+            if i<bsize:
+                b[i] = d[k]
+            else:
+                setattr(self, "buffer_"+str(j), torch.cat([b, d[k][None]], dim=0))
 
     def _buffer(self, i):
         return getattr(self, "buffer_"+str(i))
+    
+    @property
+    def buffer_size(self):
+        return self.buffer_0.size(0)
     
     def print(self, s):
         print(f".   Rank {self.rank}: "+s)
@@ -336,34 +343,26 @@ class DictShuffleDataset(_NestedStatefulDataset):
         assert len(first_draw.keys())==self.n_data_fields, f"Num data fields ({len(first_draw.keys())}) does not match specified value ({self.n_data_fields}): {list(first_draw.keys())}"
         # If buffer entries have wrong length, reset buffer
         shape_match = True
-        if self.buffer_size == 0:
-            shape_match = False
-        else:
-            for i in range(self.n_data_fields):
-                if first_draw[self.data_keys[i]].shape != self._buffer(i)[0].shape:
-                    shape_match = False
+        for i in range(self.n_data_fields):
+            if first_draw[self.data_keys[i]].shape != self._buffer(i)[0].shape:
+                shape_match = False
         self.print(f"Shape check finished {shape_match}")
         if not shape_match:
-            self.buffer_size = 0
             for i in range(self.n_data_fields):
-                setattr(self, "buffer_"+str(i), torch.stack([first_draw[self.data_keys[i]],]*self.window_size, dim=0))
+                setattr(self, "buffer_"+str(i), first_draw[self.data_keys[i]][None])
                 self.print(f"Buffer {self.data_keys[i]} created")
 
         while True:
-            # If buffer is undersized, add up to two datapoints
-            self.print("Pulling new entries")
-            for _ in range(2):
-                if self.buffer_size < self.window_size:
-                    d = first_draw or next(dataset)
-                    first_draw = None
-                    self._set(self.buffer_size, d)
-                    self.buffer_size += 1
-            # Pull out randomly sampled entry from buffer, replace with latest
+            # If buffer is undersized, add datapoint
+            if self.buffer_size < self.window_size:
+                d = first_draw or next(dataset)
+                first_draw = None
+                self._set(self.buffer_size, d)
+            # Pull out randomly sampled entry from buffer, replace with new
             i = torch.randint(self.buffer_size, (1,), generator=self.generator).item()
             self.print("Swapping")
             out = self._get(i)
-            self._set(i, self._get(self.buffer_size-1))
-            self.buffer_size -= 1
+            self._set(i, first_draw or next(dataset))
             self.print(f"Yielding {i}")
             yield out
 
