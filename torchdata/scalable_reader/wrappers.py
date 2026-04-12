@@ -370,9 +370,11 @@ class DictShuffleDataset(_NestedStatefulDataset):
     def state_dict(self):
         # Create generator if it doesn't already exist
         self.setup()
+        self.print("Assembling dict")
         # Write generator state manually
         self.g_state = self.generator.get_state().clone().tolist()
         out = super().state_dict()
+        self.print("Dict assembled")
         return out
 
     def load_state_dict(self, state_dict):
