@@ -365,6 +365,7 @@ class DictShuffleDataset(_NestedStatefulDataset):
             self._set(i, first_draw or next(dataset))
             self.print(f"Yielding {i}")
             yield out
+            time.sleep(1)
 
     def state_dict(self):
         # Create generator if it doesn't already exist
